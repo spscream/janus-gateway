@@ -2035,7 +2035,7 @@ void janus_sip_create_session(janus_plugin_session *handle, int *error) {
 	session->account.authuser = NULL;
 	session->account.secret = NULL;
 	session->account.secret_type = janus_sip_secret_type_unknown;
-	session->account.sip_port = 0;
+	session->account.sip_port = 5060;
 	session->account.proxy = NULL;
 	session->account.outbound_proxy = NULL;
 	session->account.registration_status = janus_sip_registration_status_unregistered;
