@@ -870,6 +870,13 @@ static void janus_ice_notify_media(janus_ice_handle *handle, char *mid, gboolean
 	janus_session *session = (janus_session *)handle->session;
 	if(session == NULL)
 		return;
+
+	janus_plugin *plugin = (janus_plugin *)handle->app;
+
+	if(plugin && plugin->media_event && janus_plugin_session_is_alive(handle->app_handle) &&
+			!g_atomic_int_get(&handle->destroyed))
+		plugin->media_event(handle->app_handle, mid, video, simulcast, substream, up);
+
 	json_t *event = json_object();
 	json_object_set_new(event, "janus", json_string("media"));
 	json_object_set_new(event, "session_id", json_integer(session->session_id));
