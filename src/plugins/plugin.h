@@ -67,12 +67,13 @@ janus_plugin *create(void) {
  * - \c incoming_data(): a callback to notify you a peer has sent you a message on a SCTP DataChannel;
  * - \c data_ready(): a callback to notify you data can be sent on the SCTP DataChannel;
  * - \c slow_link(): a callback to notify you Janus or the peer have lost packets recently, and the media path may be slow;
+ * - \c media_event(): a callback to notify you a media state has changed;
  * - \c hangup_media(): a callback to notify you the peer PeerConnection has been closed (e.g., after a DTLS alert);
  * - \c query_session(): this method is called by the core to get plugin-specific info on a session between you and a peer;
  * - \c destroy_session(): this method is called by the core to destroy a session between you and a peer.
  *
  * All the above methods and callbacks, except for \c incoming_rtp ,
- * \c incoming_rtcp , \c incoming_data and \c slow_link , are mandatory:
+ * \c incoming_rtcp , \c incoming_data, \c media_event and \c slow_link , are mandatory:
  * the Janus core will reject a plugin that doesn't implement any of the
  * mandatory callbacks. The previously mentioned ones, instead, are
  * optional, so you're free to implement only those you care about. If
@@ -208,6 +209,7 @@ static janus_plugin janus_echotest_plugin =
 		.incoming_data = NULL,			\
 		.data_ready = NULL,				\
 		.slow_link = NULL,				\
+		.media_event = NULL, 			\
 		.hangup_media = NULL,			\
 		.destroy_session = NULL,		\
 		.query_session = NULL, 			\
@@ -335,6 +337,14 @@ struct janus_plugin {
 	 * @param[in] uplink Whether this is related to the uplink (Janus to peer)
 	 * or downlink (peer to Janus) */
 	void (* const slow_link)(janus_plugin_session *handle, int mindex, gboolean video, gboolean uplink);
+	/*! \brief Method to be notified by core when media state is changed
+	 * @param[in] handle The plugin/gateway session used for this peer
+	 * @param[in] mid The mid which is media event related to
+	 * @param[in] video Whether this is related to an audio or a video stream
+	 * @param[in] simulcast Is it simulcast involved?
+	 * @param[in] substream The subtream number if simulcast involved
+	 * @param[in] up Whether is media receiving or not */
+	void (* const media_event)(janus_plugin_session *handle, char *mid, gboolean video, gboolean simulcast, int substream, gboolean up);
 	/*! \brief Callback to be notified about DTLS alerts from a peer (i.e., the PeerConnection is not valid any more)
 	 * @param[in] handle The plugin/gateway session used for this peer */
 	void (* const hangup_media)(janus_plugin_session *handle);
