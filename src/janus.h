@@ -42,6 +42,8 @@ typedef struct janus_request janus_request;
 
 /*! \brief Janus Core-Client session */
 typedef struct janus_session {
+	/*! \brief Optional call_id parameter which can be passed on session create*/
+	gchar call_id;
 	/*! \brief Janus Core-Client session ID */
 	guint64 session_id;
 	/*! \brief Map of handles this session is managing */
@@ -70,8 +72,9 @@ typedef struct janus_session {
 ///@{
 /*! \brief Method to create a new Janus Core-Client session
  * @param[in] session_id The desired Janus Core-Client session ID, or 0 if it needs to be generated randomly
+ * @param[in] call_id The optionall call_id can be passed, which will be used in events loggers
  * @returns The created Janus Core-Client session if successful, NULL otherwise */
-janus_session *janus_session_create(guint64 session_id);
+janus_session *janus_session_create(guint64 session_id, gchar call_id);
 /*! \brief Method to find an existing Janus Core-Client session from its ID
  * @param[in] session_id The Janus Core-Client session ID
  * @returns The created Janus Core-Client session if successful, NULL otherwise */

@@ -764,7 +764,7 @@ static gboolean janus_status_sessions(gpointer user_data) {
 	return TRUE;
 }
 
-janus_session *janus_session_create(guint64 session_id) {
+janus_session *janus_session_create(guint64 session_id, gchar call_id) {
 	janus_session *session = NULL;
 	if(session_id == 0) {
 		while(session_id == 0) {
@@ -779,6 +779,7 @@ janus_session *janus_session_create(guint64 session_id) {
 	}
 	session = (janus_session *)g_malloc(sizeof(janus_session));
 	JANUS_LOG(LOG_INFO, "Creating new session: %"SCNu64"; %p\n", session_id, session);
+	session->call_id = call_id;
 	session->session_id = session_id;
 	janus_refcount_init(&session->ref, janus_session_free);
 	session->source = NULL;
@@ -1133,8 +1134,14 @@ int janus_process_incoming_request(janus_request *request) {
 			}
 		}
 
+		const gchar *call_id;
+		json_t *call_id_json = json_object_get(root, "call_id");
+		if(call_id_json != NULL) {
+			call_id = json_string_value(call_id_json);
+		}
+
 		/* Handle it */
-		session = janus_session_create(session_id);
+		session = janus_session_create(session_id, *call_id);
 		if(session == NULL) {
 			ret = janus_process_error(request, session_id, transaction_text, JANUS_ERROR_UNKNOWN, "Memory error");
 			goto jsondone;
@@ -1158,6 +1165,7 @@ int janus_process_incoming_request(janus_request *request) {
 			uint64_t p = janus_uint64_hash(GPOINTER_TO_UINT(session->source->instance));
 			g_snprintf(id, sizeof(id), "%"SCNu64, p);
 			json_object_set_new(transport, "id", json_string(id));
+			json_object_set_new(transport, "call_id", json_string(call_id));
 			janus_events_notify_handlers(JANUS_EVENT_TYPE_SESSION, JANUS_EVENT_SUBTYPE_NONE,
 				session_id, "created", transport);
 		}
