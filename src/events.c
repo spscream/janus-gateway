@@ -109,6 +109,7 @@ void janus_events_notify_handlers(int type, int subtype, guint64 session_id, ...
 		} else if(type == JANUS_EVENT_TYPE_SESSION) {
 			/* Session events may allocate a json_t object for transport-related info, unref it */
 			va_arg(args, char *);
+			va_arg(args, char *);
 			json_t *transport = va_arg(args, json_t *);
 			if(transport != NULL)
 				json_decref(transport);
@@ -154,8 +155,11 @@ void janus_events_notify_handlers(int type, int subtype, guint64 session_id, ...
 	switch(type) {
 		case JANUS_EVENT_TYPE_SESSION: {
 			/* For sessions, there's just a generic event name (what happened) */
+			char *call_id = va_arg(args, char *);
 			char *name = va_arg(args, char *);
 			json_object_set_new(body, "name", json_string(name));
+			if(call_id != NULL)
+				json_object_set_new(event, "call_id", json_string(call_id));
 			json_t *transport = va_arg(args, json_t *);
 			if(transport != NULL)
 				json_object_set_new(body, "transport", transport);

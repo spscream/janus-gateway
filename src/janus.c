@@ -98,6 +98,7 @@ static int janus_process_error_string(janus_request *request, uint64_t session_i
 static struct janus_json_parameter incoming_request_parameters[] = {
 	{"transaction", JSON_STRING, JANUS_JSON_PARAM_REQUIRED},
 	{"janus", JSON_STRING, JANUS_JSON_PARAM_REQUIRED},
+	{"call_id", JSON_STRING, 0},
 	{"id", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE}
 };
 static struct janus_json_parameter attach_parameters[] = {
@@ -663,6 +664,11 @@ static void janus_session_free(const janus_refcount *session_ref) {
 		janus_request_destroy(session->source);
 		session->source = NULL;
 	}
+	if(session->call_id != NULL) {
+		printf("call_id: %s", session->call_id);
+		g_free(session->call_id);
+		session->call_id = NULL;
+	}
 	g_free(session);
 }
 
@@ -717,7 +723,7 @@ static gboolean janus_check_sessions(gpointer user_data) {
 					/* Notify event handlers as well */
 					if(janus_events_is_enabled())
 						janus_events_notify_handlers(JANUS_EVENT_TYPE_SESSION, JANUS_EVENT_SUBTYPE_NONE,
-							session->session_id, "timeout", NULL);
+							session->session_id, session->call_id, "timeout", NULL);
 					/* FIXME Is this safe? apparently it causes hash table errors on the console */
 					g_hash_table_iter_remove(&iter);
 					janus_session_destroy(session);
@@ -764,7 +770,7 @@ static gboolean janus_status_sessions(gpointer user_data) {
 	return TRUE;
 }
 
-janus_session *janus_session_create(guint64 session_id, gchar call_id) {
+janus_session *janus_session_create(guint64 session_id, const char *call_id) {
 	janus_session *session = NULL;
 	if(session_id == 0) {
 		while(session_id == 0) {
@@ -779,7 +785,8 @@ janus_session *janus_session_create(guint64 session_id, gchar call_id) {
 	}
 	session = (janus_session *)g_malloc(sizeof(janus_session));
 	JANUS_LOG(LOG_INFO, "Creating new session: %"SCNu64"; %p\n", session_id, session);
-	session->call_id = call_id;
+	if(call_id != NULL)
+		session->call_id = g_strdup(call_id);
 	session->session_id = session_id;
 	janus_refcount_init(&session->ref, janus_session_free);
 	session->source = NULL;
@@ -1134,14 +1141,11 @@ int janus_process_incoming_request(janus_request *request) {
 			}
 		}
 
-		const gchar *call_id;
 		json_t *call_id_json = json_object_get(root, "call_id");
-		if(call_id_json != NULL) {
-			call_id = json_string_value(call_id_json);
-		}
+		const char *call_id = call_id_json ? json_string_value(call_id_json) : NULL;
 
 		/* Handle it */
-		session = janus_session_create(session_id, *call_id);
+		session = janus_session_create(session_id, call_id);
 		if(session == NULL) {
 			ret = janus_process_error(request, session_id, transaction_text, JANUS_ERROR_UNKNOWN, "Memory error");
 			goto jsondone;
@@ -1165,9 +1169,8 @@ int janus_process_incoming_request(janus_request *request) {
 			uint64_t p = janus_uint64_hash(GPOINTER_TO_UINT(session->source->instance));
 			g_snprintf(id, sizeof(id), "%"SCNu64, p);
 			json_object_set_new(transport, "id", json_string(id));
-			json_object_set_new(transport, "call_id", json_string(call_id));
 			janus_events_notify_handlers(JANUS_EVENT_TYPE_SESSION, JANUS_EVENT_SUBTYPE_NONE,
-				session_id, "created", transport);
+				session_id, call_id, "created", transport);
 		}
 		/* Prepare JSON reply */
 		json_t *reply = janus_create_message("success", 0, transaction_text);
@@ -1291,6 +1294,7 @@ int janus_process_incoming_request(janus_request *request) {
 			goto jsondone;
 		}
 		janus_mutex_lock(&sessions_mutex);
+		char* call_id = g_strdup(session->call_id);
 		if(g_hash_table_remove(sessions, &session->session_id))
 			g_atomic_int_dec_and_test(&sessions_num);
 		janus_mutex_unlock(&sessions_mutex);
@@ -1310,7 +1314,8 @@ int janus_process_incoming_request(janus_request *request) {
 		/* Notify event handlers as well */
 		if(janus_events_is_enabled())
 			janus_events_notify_handlers(JANUS_EVENT_TYPE_SESSION, JANUS_EVENT_SUBTYPE_NONE,
-				session_id, "destroyed", NULL);
+				session_id, call_id, "destroyed", NULL);
+		g_free(call_id);
 	} else if(!strcasecmp(message_text, "detach")) {
 		if(handle == NULL) {
 			/* Query is an handle-level command */
@@ -2866,6 +2871,7 @@ int janus_process_incoming_admin_request(janus_request *request) {
 		/* Session-related */
 		if(!strcasecmp(message_text, "destroy_session")) {
 			janus_mutex_lock(&sessions_mutex);
+			char* call_id = g_strdup(session->call_id);
 			if(g_hash_table_remove(sessions, &session->session_id))
 				g_atomic_int_dec_and_test(&sessions_num);
 			janus_mutex_unlock(&sessions_mutex);
@@ -2884,7 +2890,8 @@ int janus_process_incoming_admin_request(janus_request *request) {
 			/* Notify event handlers as well */
 			if(janus_events_is_enabled())
 				janus_events_notify_handlers(JANUS_EVENT_TYPE_SESSION, JANUS_EVENT_SUBTYPE_NONE,
-					session_id, "destroyed", NULL);
+					session_id, call_id, "destroyed", NULL);
+			g_free(call_id);
 			goto jsondone;
 		} else if (!strcasecmp(message_text, "set_session_timeout")) {
 			/* Specific session timeout setting. */
