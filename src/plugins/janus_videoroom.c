@@ -2202,6 +2202,9 @@ static struct janus_json_parameter remote_publisher_parameters[] = {
 	{"iface", JANUS_JSON_STRING, 0},
 	{"port", JANUS_JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"streams", JANUS_JSON_ARRAY, JANUS_JSON_PARAM_REQUIRED},
+	{"contour", JSON_STRING, 0},
+	{"contour_shared", JANUS_JSON_BOOL, 0},
+	{"server_id", JSON_STRING, 0}
 };
 static struct janus_json_parameter remote_publisher_update_parameters[] = {
 	{"secret", JSON_STRING, 0},
@@ -7747,6 +7750,9 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		char user_id_num[30], *user_id_str = NULL;
 		gboolean user_id_allocated = FALSE;
 		json_t *id = json_object_get(root, "id");
+		json_t *server_id = json_object_get(root, "server_id");
+		json_t *contour = json_object_get(root, "contour");
+		json_t *contour_shared = json_object_get(root, "contour_shared");
 		if(id) {
 			if(!string_ids) {
 				user_id = json_integer_value(id);
@@ -7877,6 +7883,10 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		publisher->remote_ssrc_offset = janus_random_uint32();
 		publisher->remote_fd = fd;
 		publisher->remote_rtcp_fd = rtcp_fd;
+		publisher->server_id = server_id ? g_strdup(json_string_value(server_id)) : NULL;
+		publisher->contour = contour ? g_strdup(json_string_value(server_id)) : NULL;
+		publisher->contour_shared = contour_shared ? json_is_true(contour_shared) : TRUE;
+		publisher->legacy = FALSE;
 		pipe(publisher->pipefd);
 		janus_mutex_init(&publisher->subscribers_mutex);
 		janus_mutex_init(&publisher->own_subscriptions_mutex);
