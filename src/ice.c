@@ -2750,6 +2750,7 @@ static void janus_ice_cb_nice_recv(NiceAgent *agent, guint stream_id, guint comp
 				int plen = 0;
 				char *payload = janus_rtp_payload(buf, buflen, &plen);
 				if (!payload) {
+					  return;
 					  JANUS_LOG(LOG_ERR, "[%"SCNu64"]     Error accessing the RTP payload len=%d\n", handle->handle_id, buflen);
 				}
 				if(rtx) {
