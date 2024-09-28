@@ -2227,7 +2227,9 @@ static struct janus_json_parameter remote_publisher_parameters[] = {
 	{"srtp_crypto", JSON_STRING, 0}
 	{"contour", JSON_STRING, 0},
 	{"contour_shared", JANUS_JSON_BOOL, 0},
-	{"server_id", JSON_STRING, 0}
+	{"server_id", JSON_STRING, 0},
+	{"srtp_suite", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
+	{"srtp_crypto", JSON_STRING, 0}
 };
 static struct janus_json_parameter remote_publisher_update_parameters[] = {
 	{"secret", JSON_STRING, 0},
