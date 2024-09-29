@@ -7984,6 +7984,8 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 							disabled = TRUE;
 						}
 					}
+				} else {
+					JANUS_LOG(LOG_ERR, "SRTP crypto (%d) (%s) not enabled for stream. \n", srtp_suite, srtp_crypto);
 				}
 			}
 			ps->type = mtype;
@@ -13961,6 +13963,7 @@ static void *janus_videoroom_remote_publisher_thread(void *user_data) {
 
 				/* Is this SRTP? */
 				if(ps->is_srtp) {
+					JANUS_LOG(LOG_ERR, "is_srtp == true, decrypting packet.\n");
 					int buflen = bytes;
 					srtp_err_status_t res = srtp_unprotect(ps->srtp_ctx, buffer, &buflen);
 					if(res != srtp_err_status_ok) {
@@ -13972,6 +13975,8 @@ static void *janus_videoroom_remote_publisher_thread(void *user_data) {
 						continue;
 					}
 					bytes = buflen;
+				} else {
+					JANUS_LOG(LOG_ERR, "is_srtp == false, not decrypting packet.\n");
 				}
 				/* Prepare the RTP packet */
 				pkt.mindex = mindex;
