@@ -2189,7 +2189,9 @@ static struct janus_json_parameter publish_remotely_parameters[] = {
 	{"host", JSON_STRING, JANUS_JSON_PARAM_REQUIRED},
 	{"host_family", JSON_STRING, 0},
 	{"port", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE | JANUS_JSON_PARAM_REQUIRED},
-	{"rtcp_port", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE}
+	{"rtcp_port", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
+	{"srtp_suite", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
+	{"srtp_crypto", JSON_STRING, 0}
 };
 static struct janus_json_parameter unpublish_remotely_parameters[] = {
 	{"secret", JSON_STRING, 0},
@@ -2204,7 +2206,9 @@ static struct janus_json_parameter remote_publisher_parameters[] = {
 	{"streams", JANUS_JSON_ARRAY, JANUS_JSON_PARAM_REQUIRED},
 	{"contour", JSON_STRING, 0},
 	{"contour_shared", JANUS_JSON_BOOL, 0},
-	{"server_id", JSON_STRING, 0}
+	{"server_id", JSON_STRING, 0},
+	{"srtp_suite", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
+	{"srtp_crypto", JSON_STRING, 0}
 };
 static struct janus_json_parameter remote_publisher_update_parameters[] = {
 	{"secret", JSON_STRING, 0},
@@ -2433,6 +2437,12 @@ typedef struct janus_videoroom_publisher {
 	struct sockaddr_storage rtcp_addr;	/* RTCP address of the remote publisher */
 	GThread *remote_thread;		/* Remote publisher incoming packets thread */
 	volatile gint remote_leaving;
+	/* Only needed for SRTP support for remote publisher */
+	gboolean is_srtp;
+	int srtp_suite;
+	char *srtp_crypto;
+	srtp_t srtp_ctx;
+	srtp_policy_t srtp_policy;
 	/* Index of RTP (or data) forwarders for this participant (all streams), if any */
 	GHashTable *rtp_forwarders;
 	janus_mutex rtp_forwarders_mutex;
@@ -2777,6 +2787,12 @@ static void janus_videoroom_publisher_free(const janus_refcount *p_ref) {
 	g_list_free_full(p->streams, (GDestroyNotify)(janus_videoroom_publisher_stream_destroy));
 	g_hash_table_unref(p->streams_byid);
 	g_hash_table_unref(p->streams_bymid);
+
+	if(p->is_srtp) {
+		g_free(p->srtp_crypto);
+		srtp_dealloc(p->srtp_ctx);
+		g_free(p->srtp_policy.key);
+	}
 
 	if(p->udp_sock > 0)
 		close(p->udp_sock);
@@ -7245,6 +7261,23 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			if(error_code != 0)
 				goto prepare_response;
 		}
+
+		/* We may need to SRTP-encrypt this stream */
+		int srtp_suite = 0;
+		const char *srtp_crypto = NULL;
+		json_t *s_suite = json_object_get(root, "srtp_suite");
+		json_t *s_crypto = json_object_get(root, "srtp_crypto");
+		if(s_suite && s_crypto) {
+			srtp_suite = json_integer_value(s_suite);
+			if(srtp_suite != 32 && srtp_suite != 80) {
+				JANUS_LOG(LOG_ERR, "Invalid SRTP suite (%d)\n", srtp_suite);
+				error_code = JANUS_VIDEOROOM_ERROR_INVALID_ELEMENT;
+				g_snprintf(error_cause, 512, "Invalid SRTP suite (%d)", srtp_suite);
+				goto prepare_response;
+			}
+			srtp_crypto = json_string_value(s_crypto);
+		}
+
 		const char *remote_id = json_string_value(json_object_get(root, "remote_id"));
 		json_t *pub_id = json_object_get(root, "publisher_id");
 		json_t *json_host = json_object_get(root, "host");
@@ -7390,7 +7423,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 				f = janus_videoroom_rtp_forwarder_add_helper(publisher, ps,
 					host, port, -1, 0,
 					(REMOTE_PUBLISHER_BASE_SSRC + ps->mindex*REMOTE_PUBLISHER_SSRC_STEP),
-					FALSE, 0, NULL, 0, FALSE, FALSE);
+					FALSE, srtp_suite, srtp_crypto, 0, FALSE, FALSE);
 				if(f != NULL)
 					f->metadata = g_strdup(remote_id);
 			} else if(ps->type == JANUS_VIDEOROOM_MEDIA_VIDEO) {
@@ -7399,7 +7432,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 				f = janus_videoroom_rtp_forwarder_add_helper(publisher, ps,
 					host, port, add_rtcp ? rtcp_port : -1, 0,
 					(REMOTE_PUBLISHER_BASE_SSRC + ps->mindex*REMOTE_PUBLISHER_SSRC_STEP),
-					FALSE, 0, NULL, 0, TRUE, FALSE);
+					FALSE, srtp_suite, srtp_crypto, 0, TRUE, FALSE);
 				if(f != NULL)
 					f->metadata = g_strdup(remote_id);
 				if(add_rtcp)
@@ -7409,7 +7442,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 					f = janus_videoroom_rtp_forwarder_add_helper(publisher, ps,
 						host, port, -1, 0,
 						(REMOTE_PUBLISHER_BASE_SSRC + ps->mindex*REMOTE_PUBLISHER_SSRC_STEP + 1),
-						FALSE, 0, NULL, 1, TRUE, FALSE);
+						FALSE, srtp_suite, srtp_crypto, 1, TRUE, FALSE);
 					if(f != NULL)
 						f->metadata = g_strdup(remote_id);
 				}
@@ -7417,7 +7450,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 					f = janus_videoroom_rtp_forwarder_add_helper(publisher, ps,
 						host, port, -1, 0,
 						(REMOTE_PUBLISHER_BASE_SSRC + ps->mindex*REMOTE_PUBLISHER_SSRC_STEP + 2),
-						FALSE, 0, NULL, 2, TRUE, FALSE);
+						FALSE, srtp_suite, srtp_crypto, 2, TRUE, FALSE);
 					if(f != NULL)
 						f->metadata = g_strdup(remote_id);
 				}
@@ -7711,6 +7744,22 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 				}
 			}
 		}
+
+		/* We may need to SRTP-decrypt this stream */
+		int srtp_suite = 0;
+		const char *srtp_crypto = NULL;
+		json_t *s_suite = json_object_get(root, "srtp_suite");
+		json_t *s_crypto = json_object_get(root, "srtp_crypto");
+		if(s_suite && s_crypto) {
+			srtp_suite = json_integer_value(s_suite);
+			if(srtp_suite != 32 && srtp_suite != 80) {
+				JANUS_LOG(LOG_ERR, "Invalid SRTP suite (%d)\n", srtp_suite);
+				error_code = JANUS_VIDEOROOM_ERROR_INVALID_ELEMENT;
+				g_snprintf(error_cause, 512, "Invalid SRTP suite (%d)", srtp_suite);
+				goto prepare_response;
+			}
+			srtp_crypto = json_string_value(s_crypto);
+		}
 		if(error_code != 0)
 			goto prepare_response;
 		/* Now access the room */
@@ -7867,6 +7916,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		publisher->contour = contour ? g_strdup(json_string_value(server_id)) : NULL;
 		publisher->contour_shared = contour_shared ? json_is_true(contour_shared) : TRUE;
 		publisher->legacy = FALSE;
+
 		pipe(publisher->pipefd);
 		janus_mutex_init(&publisher->subscribers_mutex);
 		janus_mutex_init(&publisher->own_subscriptions_mutex);
@@ -7991,6 +8041,57 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			g_hash_table_insert(publisher->streams_byid, GINT_TO_POINTER(ps->mindex), ps);
 			g_hash_table_insert(publisher->streams_bymid, g_strdup(ps->mid), ps);
 			mindex++;
+		}
+
+		/* First of all, let's check if we need to setup an SRTP for remote publisher */
+		if(srtp_suite > 0 && srtp_crypto != NULL) {
+			/* Base64 decode the crypto string and set it as the SRTP context */
+			gsize len = 0;
+			guchar *decoded = g_base64_decode(srtp_crypto, &len);
+			if(len < SRTP_MASTER_LENGTH) {
+				/* Something went wrong */
+				g_free(decoded);
+				JANUS_LOG(LOG_ERR, "Invalid SRTP crypto (%s)\n", srtp_crypto);
+				janus_mutex_unlock(&videoroom->mutex);
+				janus_refcount_decrease(&videoroom->ref);
+				janus_videoroom_publisher_destroy(publisher);
+				janus_refcount_decrease(&publisher->ref);
+				janus_refcount_decrease(&publisher->session->ref);
+				error_code = JANUS_VIDEOROOM_ERROR_UNKNOWN_ERROR;
+				g_snprintf(error_cause, 512, "Invalid SRTP crypto");
+				goto prepare_response;
+			}
+
+			/* Set SRTP policy */
+			srtp_policy_t *policy = &publisher->srtp_policy;
+			srtp_crypto_policy_set_rtp_default(&(policy->rtp));
+			if(srtp_suite == 32) {
+				srtp_crypto_policy_set_aes_cm_128_hmac_sha1_32(&(policy->rtp));
+			} else if(srtp_suite == 80) {
+				srtp_crypto_policy_set_aes_cm_128_hmac_sha1_80(&(policy->rtp));
+			}
+			policy->ssrc.type = ssrc_any_inbound;
+			policy->key = decoded;
+			policy->next = NULL;
+
+			/* Create SRTP context */
+			srtp_err_status_t res = srtp_create(&publisher->srtp_ctx, policy);
+			if(res != srtp_err_status_ok) {
+				/* Something went wrong... */
+				g_free(decoded);
+				JANUS_LOG(LOG_ERR, "Error creating forwarder SRTP session: %d (%s)\n", res, janus_srtp_error_str(res));
+				janus_mutex_unlock(&videoroom->mutex);
+				janus_refcount_decrease(&videoroom->ref);
+				janus_videoroom_publisher_destroy(publisher);
+				janus_refcount_decrease(&publisher->ref);
+				janus_refcount_decrease(&publisher->session->ref);
+				error_code = JANUS_VIDEOROOM_ERROR_UNKNOWN_ERROR;
+				g_snprintf(error_cause, 512, "Error creating forwarder SRTP session");
+				goto prepare_response;
+			}
+			publisher->is_srtp = TRUE;
+			publisher->srtp_suite = srtp_suite;
+			publisher->srtp_crypto = g_strdup(srtp_crypto);
 		}
 		/* Done, spawn a thread for this remote publisher */
 		janus_refcount_increase(&publisher->ref);
@@ -13866,6 +13967,21 @@ static void *janus_videoroom_remote_publisher_thread(void *user_data) {
 					/* Now handle the packet as if coming from a regular publisher */
 					janus_videoroom_incoming_data_internal(publisher->session, publisher, &data);
 					continue;
+				}
+
+				/* Is this SRTP? */
+				if(publisher->is_srtp) {
+					int buflen = bytes;
+					srtp_err_status_t res = srtp_unprotect(publisher->srtp_ctx, buffer, &buflen);
+					if(res != srtp_err_status_ok) {
+						janus_mutex_unlock(&publisher->streams_mutex);
+						guint32 timestamp = ntohl(rtp->timestamp);
+						guint16 seq = ntohs(rtp->seq_number);
+						JANUS_LOG(LOG_ERR, "[%s] Publisher stream (#%d) SRTP unprotect error: %s (len=%d-->%d, ts=%"SCNu32", seq=%"SCNu16")\n",
+							publisher->user_id_str, ps->mindex, janus_srtp_error_str(res), bytes, buflen, timestamp, seq);
+						continue;
+					}
+					bytes = buflen;
 				}
 				/* Prepare the RTP packet */
 				pkt.mindex = mindex;
