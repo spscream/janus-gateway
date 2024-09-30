@@ -2475,6 +2475,8 @@ typedef struct janus_videoroom_publisher {
 	gboolean audio_receiving;
 	gboolean video_receiving;
 	gboolean screen_receiving;
+	gint64 audio_latest_received;
+	gint64 video_latest_received;
 	volatile gint destroyed;
 	janus_refcount ref;
 } janus_videoroom_publisher;
@@ -2533,6 +2535,8 @@ typedef struct janus_videoroom_publisher_stream {
 	char *srtp_crypto;
 	srtp_t srtp_ctx;
 	srtp_policy_t srtp_policy;
+	/* This need for alive flag on stream */
+	gint64 latest_received;
 	/* Subscriptions to this publisher stream (who's receiving it)  */
 	GSList *subscribers;
 	janus_mutex subscribers_mutex;
@@ -3149,6 +3153,8 @@ static void janus_videoroom_create_dummy_publisher(janus_videoroom *room, GHashT
 	publisher->acodec = JANUS_AUDIOCODEC_NONE;
 	publisher->vcodec = JANUS_VIDEOCODEC_NONE;
 	publisher->dummy = TRUE;
+    publisher->audio_latest_received = 0;
+    publisher->video_latest_received = 0;
 	janus_mutex_init(&publisher->subscribers_mutex);
 	janus_mutex_init(&publisher->own_subscriptions_mutex);
 	publisher->streams_byid = g_hash_table_new_full(NULL, NULL,
@@ -3201,6 +3207,7 @@ static void janus_videoroom_create_dummy_publisher(janus_videoroom *room, GHashT
 		}
 		ps->min_delay = -1;
 		ps->max_delay = -1;
+		ps->latest_received = 0;
 		g_atomic_int_set(&ps->destroyed, 0);
 		janus_refcount_init(&ps->ref, janus_videoroom_publisher_stream_free);
 		janus_refcount_increase(&ps->ref);	/* This is for the id-indexed hashtable */
@@ -3248,6 +3255,7 @@ static void janus_videoroom_create_dummy_publisher(janus_videoroom *room, GHashT
 			ps->vp9_profile = g_strdup(room->vp9_profile);
 		ps->min_delay = -1;
 		ps->max_delay = -1;
+		ps->latest_received = 0;
 		g_atomic_int_set(&ps->destroyed, 0);
 		janus_refcount_init(&ps->ref, janus_videoroom_publisher_stream_free);
 		janus_refcount_increase(&ps->ref);	/* This is for the id-indexed hashtable */
@@ -3566,7 +3574,7 @@ static json_t *janus_videoroom_subscriber_streams_summary(janus_videoroom_subscr
 		} else if(ps && stream->type != JANUS_VIDEOROOM_MEDIA_DATA) {
 			if(ps->publisher) {
 				json_object_set_new(m, "feed_id", string_ids ? json_string(ps->publisher->user_id_str) : json_integer(ps->publisher->user_id));
-				json_object_set_new(m, "alive", ps->publisher->video_receiving || ps->publisher->screen_receiving ? json_true() : json_false());
+				json_object_set_new(m, "alive", janus_get_monotonic_time() - ps->latest_received > 2*G_USEC_PER_SEC ? json_false() : json_true());
 				if(ps->publisher->display)
 					json_object_set_new(m, "feed_display", json_string(ps->publisher->display));
 				/* If this is a legacy subscription, put the info in the generic part too */
@@ -4314,6 +4322,7 @@ static void janus_videoroom_notify_about_publisher(janus_videoroom_publisher *p,
 	/* Notify all other participants that there's a new boy in town */
 	json_t *list = json_array();
 	json_t *pl = json_object();
+	gint64 now = janus_get_monotonic_time();
 	json_object_set_new(pl, "id", string_ids ? json_string(p->user_id_str) : json_integer(p->user_id));
 	json_object_set_new(pl, "legacy", p->legacy ? json_true() : json_false());
 	if(p->display)
@@ -4326,9 +4335,9 @@ static void janus_videoroom_notify_about_publisher(janus_videoroom_publisher *p,
 		json_object_set_new(pl, "contour", json_string(p->contour));
 		json_object_set_new(pl, "contour_shared", p->contour_shared ? json_true() : json_false());
 	}
-	if(p->audio_receiving)
+	if(now - p->audio_latest_received <= 2*G_USEC_PER_SEC)
 		json_object_set_new(pl, "audio", json_true());
-	if(p->video_receiving)
+	if(now - p->video_latest_received <= 2*G_USEC_PER_SEC)
 		json_object_set_new(pl, "video", json_true());
 	if(p->screen_receiving)
 		json_object_set_new(pl, "screen", json_true());
@@ -6929,6 +6938,8 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		janus_mutex_lock(&videoroom->mutex);
 		g_hash_table_iter_init(&iter, videoroom->participants);
 
+		gint64 now = janus_get_monotonic_time();
+
 		while (!g_atomic_int_get(&videoroom->destroyed) && g_hash_table_iter_next(&iter, NULL, &value)) {
 			janus_videoroom_publisher *p = value;
 
@@ -6939,8 +6950,8 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			json_t *pl = json_object();
 
 			json_object_set_new(pl, "id", string_ids ? json_string(p->user_id_str) : json_integer(p->user_id));
-			json_object_set_new(pl, "audio", p->audio_receiving ? json_true() : json_false());
-			json_object_set_new(pl, "video", p->video_receiving ? json_true() : json_false());
+			json_object_set_new(pl, "audio", now - p->audio_latest_received <= 2*G_USEC_PER_SEC ? json_true() : json_false());
+			json_object_set_new(pl, "video", now - p->video_latest_received <= 2*G_USEC_PER_SEC ? json_true() : json_false());
 			json_object_set_new(pl, "screen", p->screen_receiving ? json_true() : json_false());
 			json_object_set_new(pl, "legacy", p->legacy ? json_true() : json_false());
 			if(p->display)
@@ -7067,12 +7078,13 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		gpointer value;
 		janus_mutex_lock(&videoroom->mutex);
 		g_hash_table_iter_init(&iter, videoroom->participants);
+		gint64 now = janus_get_monotonic_time();
 		while (!g_atomic_int_get(&videoroom->destroyed) && g_hash_table_iter_next(&iter, NULL, &value)) {
 			janus_videoroom_publisher *p = value;
 			json_t *pl = json_object();
 			json_object_set_new(pl, "id", string_ids ? json_string(p->user_id_str) : json_integer(p->user_id));
-			json_object_set_new(pl, "audio", p->audio_receiving ? json_true() : json_false());
-			json_object_set_new(pl, "video", p->video_receiving ? json_true() : json_false());
+			json_object_set_new(pl, "audio", now - p->audio_latest_received <= 2*G_USEC_PER_SEC ? json_true() : json_false());
+			json_object_set_new(pl, "video", now - p->video_latest_received <= 2*G_USEC_PER_SEC ? json_true() : json_false());
 			json_object_set_new(pl, "screen", p->screen_receiving ? json_true() : json_false());
 			json_object_set_new(pl, "legacy", p->legacy ? json_true() : json_false());
 			if(p->display)
@@ -7989,6 +8001,8 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		publisher->contour = contour ? g_strdup(json_string_value(server_id)) : NULL;
 		publisher->contour_shared = contour_shared ? json_is_true(contour_shared) : TRUE;
 		publisher->legacy = FALSE;
+		publisher->audio_latest_received = 0;
+		publisher->video_latest_received = 0;
 		pipe(publisher->pipefd);
 		janus_mutex_init(&publisher->subscribers_mutex);
 		janus_mutex_init(&publisher->own_subscriptions_mutex);
@@ -8070,6 +8084,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			ps->vcodec = JANUS_VIDEOCODEC_NONE;
 			ps->min_delay = -1;
 			ps->max_delay = -1;
+			ps->latest_received = 0;
 			if(mtype == JANUS_VIDEOROOM_MEDIA_AUDIO) {
 				ps->acodec = janus_audiocodec_from_name(codec);
 				ps->pt = janus_audiocodec_pt(ps->acodec);
@@ -8415,6 +8430,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			ps->vcodec = JANUS_VIDEOCODEC_NONE;
 			ps->min_delay = -1;
 			ps->max_delay = -1;
+			ps->latest_received = 0;
 			if(mtype == JANUS_VIDEOROOM_MEDIA_AUDIO) {
 				ps->acodec = janus_audiocodec_from_name(codec);
 				ps->pt = janus_audiocodec_pt(ps->acodec);
@@ -8839,6 +8855,7 @@ void janus_videoroom_incoming_rtp(janus_plugin_session *handle, janus_plugin_rtp
 	janus_videoroom_incoming_rtp_internal(session, participant, pkt);
 }
 static void janus_videoroom_incoming_rtp_internal(janus_videoroom_session *session, janus_videoroom_publisher *participant, janus_plugin_rtp *pkt) {
+
 	if(g_atomic_int_get(&participant->destroyed) || participant->kicked || !participant->streams) {
 		janus_videoroom_publisher_dereference_nodebug(participant);
 		return;
@@ -8871,8 +8888,13 @@ static void janus_videoroom_incoming_rtp_internal(janus_videoroom_session *sessi
 	gboolean video = pkt->video;
 	char *buf = pkt->buffer;
 	uint16_t len = pkt->length;
+
+	gint64 now = janus_get_monotonic_time();
+	ps->latest_received = now;
+
 	/* In case this is an audio packet and we're doing talk detection, check the audio level extension */
 	if(!video && videoroom->audiolevel_event && ps->active && !ps->muted && ps->audio_level_extmap_id > 0) {
+		participant->audio_latest_received = now;
 		int level = pkt->extensions.audio_level;
 		if(level != -1) {
 			ps->audio_dBov_sum += level;
@@ -9045,6 +9067,7 @@ static void janus_videoroom_incoming_rtp_internal(janus_videoroom_session *sessi
 
 		/* Check if we need to send any REMB, FIR or PLI back to this publisher */
 		if(video && ps->active && !ps->muted) {
+			participant->video_latest_received = now;
 			/* Did we send a REMB already, or is it time to send one? */
 			gboolean send_remb = FALSE;
 			if(participant->remb_latest == 0 && participant->remb_startup > 0) {
@@ -9965,6 +9988,8 @@ static void *janus_videoroom_handler(void *data) {
 				publisher->subscriptions = NULL;
 				publisher->acodec = JANUS_AUDIOCODEC_NONE;
 				publisher->vcodec = JANUS_VIDEOCODEC_NONE;
+                publisher->audio_latest_received = 0;
+                publisher->video_latest_received = 0;
 				janus_mutex_init(&publisher->subscribers_mutex);
 				janus_mutex_init(&publisher->own_subscriptions_mutex);
 				publisher->streams_byid = g_hash_table_new_full(NULL, NULL,
@@ -10118,6 +10143,7 @@ static void *janus_videoroom_handler(void *data) {
 				g_hash_table_insert(publisher->room->private_ids, GUINT_TO_POINTER(publisher->pvt_id), publisher);
 				janus_mutex_unlock(&session->mutex);
 				g_hash_table_iter_init(&iter, publisher->room->participants);
+				gint64 now = janus_get_monotonic_time();
 				while (!g_atomic_int_get(&publisher->room->destroyed) && g_hash_table_iter_next(&iter, NULL, &value)) {
 					janus_videoroom_publisher *p = value;
 					if(p == publisher || !p->streams || !g_atomic_int_get(&p->session->started)) {
@@ -10133,8 +10159,8 @@ static void *janus_videoroom_handler(void *data) {
 					}
 					json_t *pl = json_object();
 					json_object_set_new(pl, "id", string_ids ? json_string(p->user_id_str) : json_integer(p->user_id));
-					json_object_set_new(pl, "audio", p->audio_receiving ? json_true() : json_false());
-					json_object_set_new(pl, "video", p->video_receiving ? json_true() : json_false());
+					json_object_set_new(pl, "audio", now - p->audio_latest_received <= 2*G_USEC_PER_SEC ? json_true() : json_false());
+					json_object_set_new(pl, "video", now - p->video_latest_received <= 2*G_USEC_PER_SEC ? json_true() : json_false());
 					json_object_set_new(pl, "screen", p->screen_receiving ? json_true() : json_false());
 					json_object_set_new(pl, "legacy", p->legacy ? json_true() : json_false());
 					if(p->display)
@@ -13028,6 +13054,7 @@ static void *janus_videoroom_handler(void *data) {
 						ps->pt = -1;
 						ps->min_delay = -1;
 						ps->max_delay = -1;
+						ps->latest_received = 0;
 						g_atomic_int_set(&ps->destroyed, 0);
 						janus_refcount_init(&ps->ref, janus_videoroom_publisher_stream_free);
 						janus_refcount_increase(&ps->ref);	/* This is for the mid-indexed hashtable */
