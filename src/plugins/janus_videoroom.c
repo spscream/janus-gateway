@@ -2004,7 +2004,8 @@ static struct janus_json_parameter join_parameters[] = {
 	{"bitrate", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"record", JANUS_JSON_BOOL, 0},
 	{"filename", JSON_STRING, 0},
-	{"token", JSON_STRING, 0}
+	{"token", JSON_STRING, 0},
+	{"metadata", JSON_STRING, 0}
 };
 static struct janus_json_parameter publish_parameters[] = {
 	{"descriptions", JANUS_JSON_ARRAY, 0},
@@ -2204,6 +2205,7 @@ static struct janus_json_parameter remote_publisher_parameters[] = {
 	{"iface", JANUS_JSON_STRING, 0},
 	{"port", JANUS_JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"streams", JANUS_JSON_ARRAY, JANUS_JSON_PARAM_REQUIRED},
+	{"metadata", JSON_STRING, 0},
 	{"contour", JSON_STRING, 0},
 	{"contour_shared", JANUS_JSON_BOOL, 0},
 	{"server_id", JSON_STRING, 0},
@@ -2447,6 +2449,7 @@ typedef struct janus_videoroom_publisher {
 	gboolean kicked;	/* Whether this participant has been kicked */
 	gboolean e2ee;		/* If media from this publisher is end-to-end encrypted */
 	janus_mutex mutex;			/* Mutex to lock this instance */
+	gchar *metadata;
 	gchar *server_id;
 	gchar *contour;
 	gboolean legacy;
@@ -4305,6 +4308,8 @@ static void janus_videoroom_notify_about_publisher(janus_videoroom_publisher *p,
 	json_object_set_new(pl, "legacy", p->legacy ? json_true() : json_false());
 	if(p->display)
 		json_object_set_new(pl, "display", json_string(p->display));
+	if(p->metadata)
+		json_object_set_new(pl, "metadata", json_string(p->metadata));
 	if(p->server_id)
 		json_object_set_new(pl, "server_id", json_string(p->server_id));
 	if(p->contour) {
@@ -6918,6 +6923,8 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			json_object_set_new(pl, "legacy", p->legacy ? json_true() : json_false());
 			if(p->display)
 				json_object_set_new(pl, "display", json_string(p->display));
+			if(p->metadata)
+				json_object_set_new(pl, "metadata", json_string(p->metadata));
 			if(p->server_id)
 				json_object_set_new(pl, "server_id", json_string(p->server_id));
 			if(p->contour) {
@@ -7051,6 +7058,9 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 				json_object_set_new(pl, "display", json_string(p->display));
 			if(p->server_id)
 				json_object_set_new(pl, "server_id", json_string(p->server_id));
+			if(p->metadata) {
+				json_object_set_new(pl, "metadata", json_string(p->metadata));
+			}
 			if(p->contour) {
 				json_object_set_new(pl, "contour", json_string(p->contour));
 				json_object_set_new(pl, "contour_shared", p->contour_shared ? json_true() : json_false());
@@ -7824,6 +7834,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		json_t *server_id = json_object_get(root, "server_id");
 		json_t *contour = json_object_get(root, "contour");
 		json_t *contour_shared = json_object_get(root, "contour_shared");
+		json_t *metadata = json_object_get(root, "metadata");
 		if(id) {
 			if(!string_ids) {
 				user_id = json_integer_value(id);
@@ -7954,6 +7965,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		publisher->remote_ssrc_offset = janus_random_uint32();
 		publisher->remote_fd = fd;
 		publisher->remote_rtcp_fd = rtcp_fd;
+		publisher->metadata = metadata ? g_strdup(json_string_value(metadata)) : NULL;
 		publisher->server_id = server_id ? g_strdup(json_string_value(server_id)) : NULL;
 		publisher->contour = contour ? g_strdup(json_string_value(server_id)) : NULL;
 		publisher->contour_shared = contour_shared ? json_is_true(contour_shared) : TRUE;
@@ -9887,7 +9899,7 @@ static void *janus_videoroom_handler(void *data) {
 				json_t *bitrate = NULL, *record = NULL, *recfile = NULL,
 					*audiocodec = NULL, *videocodec = NULL,
 					*user_audio_active_packets = NULL, *user_audio_level_average = NULL,
-					*server_id = NULL, *contour = NULL, *contour_shared = NULL, *legacy = NULL;
+					*server_id = NULL, *contour = NULL, *contour_shared = NULL, *legacy = NULL, *metadata = NULL;
 				if(!strcasecmp(request_text, "joinandconfigure")) {
 					/* Also configure (or publish a new feed) audio/video/bitrate for this new publisher */
 					/* join_parameters were validated earlier. */
@@ -9897,6 +9909,7 @@ static void *janus_videoroom_handler(void *data) {
 					record = json_object_get(root, "record");
 					recfile = json_object_get(root, "filename");
 				}
+				metadata = json_object_get(root, "metadata");
 				server_id = json_object_get(root, "server_id");
 				contour = json_object_get(root, "contour");
 				contour_shared = json_object_get(root, "contour_shared");
@@ -9912,6 +9925,7 @@ static void *janus_videoroom_handler(void *data) {
 				publisher->user_id = user_id;
 				publisher->user_id_str = user_id_str ? g_strdup(user_id_str) : NULL;
 				publisher->display = display_text ? g_strdup(display_text) : NULL;
+				publisher->metadata = NULL;
 				publisher->server_id = NULL;
 				publisher->contour = NULL;
 				publisher->contour_shared = TRUE;
@@ -10023,6 +10037,11 @@ static void *janus_videoroom_handler(void *data) {
 					JANUS_LOG(LOG_VERB, "Setting user audio_level_average: %d (room %s, user %s)\n",
 						publisher->user_audio_level_average, publisher->room_id_str, publisher->user_id_str);
 				}
+				if(metadata) {
+					publisher->metadata = g_strdup(json_string_value(metadata));
+					JANUS_LOG(LOG_VERB, "Setting metadata: %s (room %s, user %s)\n",
+						publisher->metadata, publisher->room_id_str, publisher->user_id_str);
+				}
 				if(server_id) {
 					publisher->server_id = g_strdup(json_string_value(server_id));
 					JANUS_LOG(LOG_VERB, "Setting server_id: %s (room %s, user %s)\n",
@@ -10095,6 +10114,8 @@ static void *janus_videoroom_handler(void *data) {
 					json_object_set_new(pl, "legacy", p->legacy ? json_true() : json_false());
 					if(p->display)
 						json_object_set_new(pl, "display", json_string(p->display));
+					if(p->metadata)
+						json_object_set_new(pl, "metadata", json_string(p->metadata));
 					if(p->server_id)
 						json_object_set_new(pl, "server_id", json_string(p->server_id));
 					if(p->contour) {
