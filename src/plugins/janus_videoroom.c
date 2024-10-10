@@ -459,6 +459,7 @@ room-<unique room ID>: {
 		{	// Participant #1
 			"id" : <unique numeric ID of the participant>,
 			"display" : "<display name of the participant, if any; optional>",
+			"metadata" : <valid json object of metadata, if any; optional>,
 			"publisher" : "<true|false, whether user is an active publisher in the room>",
 			"talking" : <true|false, whether user is talking or not (only if audio levels are used)>
 		},
@@ -494,7 +495,8 @@ room-<unique room ID>: {
 	"room" : <unique ID of the room to join>,
 	"id" : <unique ID to register for the publisher; optional, will be chosen by the plugin if missing>,
 	"display" : "<display name for the publisher; optional>",
-	"token" : "<invitation token, in case the room has an ACL; optional>"
+	"token" : "<invitation token, in case the room has an ACL; optional>",
+	"metadata" : <valid json object with metadata; optional>
 }
 \endverbatim
  *
@@ -523,6 +525,7 @@ room-<unique room ID>: {
 		{
 			"id" : <unique ID of active publisher #1>,
 			"display" : "<display name of active publisher #1, if any>",
+			"metadata" : <valid json object of metadata, if any>,
 			"dummy" : <true if this participant is a dummy publisher>,
 			"streams" : [
 				{
@@ -546,7 +549,8 @@ room-<unique room ID>: {
 	"attendees" : [		// Only present when notify_joining is set to TRUE for rooms
 		{
 			"id" : <unique ID of attendee #1>,
-			"display" : "<display name of attendee #1, if any>"
+			"display" : "<display name of attendee #1, if any>",
+			"metadata" : <valid json object of metadata, if any>
 		},
 		// Other attendees
 	]
@@ -576,7 +580,8 @@ room-<unique room ID>: {
 	"room" : <room ID>,
 	"joining" : {
 		"id" : <unique ID of the new participant>,
-		"display" : "<display name of the new participant, if any>"
+		"display" : "<display name of the new participant, if any>",
+		"metadata" : <valid json object of metadata, if any>
 	}
 }
 \endverbatim
@@ -601,6 +606,7 @@ room-<unique room ID>: {
 	"record" : <true|false, whether this publisher should be recorded or not; optional>,
 	"filename" : "<if recording, the base path/file to use for the recording files; optional>",
 	"display" : "<display name to use in the room; optional>",
+	"metadata" : <valid json object of metadata; optional>,
 	"audio_level_average" : "<if provided, overrides the room audio_level_average for this user; optional>",
 	"audio_active_packets" : "<if provided, overrides the room audio_active_packets for this user; optional>",
 	"descriptions" : [	// Optional
@@ -668,6 +674,7 @@ room-<unique room ID>: {
 		{
 			"id" : <unique ID of the new publisher>,
 			"display" : "<display name of the new publisher, if any>",
+			"metadata" : <valid json object of metadata, if any>,
 			"dummy" : <true if this participant is a dummy publisher>,
 			"streams" : [
 				{
@@ -740,6 +747,7 @@ room-<unique room ID>: {
 	"record" : <true|false, whether this publisher should be recorded or not; optional>,
 	"filename" : "<if recording, the base path/file to use for the recording files; optional>",
 	"display" : "<new display name to use in the room; optional>",
+	"metadata" : <new metadata json object; optional>,
 	"audio_active_packets" : "<new audio_active_packets to overwrite in the room one; optional>",
 	"audio_level_average" : "<new audio_level_average to overwrite the room one; optional>",
 	"streams" : [
@@ -1648,6 +1656,7 @@ room-<unique room ID>: {
 	"id" : <unique ID of the remote publisher>,
 	"secret" : "<password required to edit the room, mandatory if configured in the room>",
 	"display" : "<new display name for the remote publisher; optional>",
+	"metadata" : <new valid json object of metadata; optional>,
 	"streams" : [
 		{
 			// Same syntax as add_remote_publisher: only needs to
@@ -2016,6 +2025,7 @@ static struct janus_json_parameter publish_parameters[] = {
 	{"record", JANUS_JSON_BOOL, 0},
 	{"filename", JSON_STRING, 0},
 	{"display", JSON_STRING, 0},
+	{"metadata", JSON_OBJECT, 0},
 	{"secret", JSON_STRING, 0},
 	{"audio_level_averge", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"audio_active_packets", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
@@ -2095,7 +2105,8 @@ static struct janus_json_parameter stop_rtp_forward_parameters[] = {
 	{"stream_id", JSON_INTEGER, JANUS_JSON_PARAM_REQUIRED | JANUS_JSON_PARAM_POSITIVE}
 };
 static struct janus_json_parameter publisher_parameters[] = {
-	{"display", JSON_STRING, 0}
+	{"display", JSON_STRING, 0},
+	{"metadata", JSON_OBJECT, 0}
 };
 static struct janus_json_parameter configure_stream_parameters[] = {
 	{"mid", JANUS_JSON_STRING, 0},
@@ -2210,10 +2221,12 @@ static struct janus_json_parameter remote_publisher_parameters[] = {
 	{"server_id", JSON_STRING, 0},
 	{"srtp_suite", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"srtp_crypto", JSON_STRING, 0}
+	{"metadata", JSON_OBJECT, 0}
 };
 static struct janus_json_parameter remote_publisher_update_parameters[] = {
 	{"secret", JSON_STRING, 0},
 	{"display", JANUS_JSON_STRING, 0},
+	{"metadata", JSON_OBJECT, 0},
 	{"streams", JANUS_JSON_ARRAY, JANUS_JSON_PARAM_REQUIRED}
 };
 static struct janus_json_parameter remote_publisher_stream_parameters[] = {
@@ -2455,6 +2468,7 @@ typedef struct janus_videoroom_publisher {
 	gboolean screen_receiving;
 	gint64 audio_latest_received;
 	gint64 video_latest_received;
+	json_t *metadata;
 	volatile gint destroyed;
 	janus_refcount ref;
 } janus_videoroom_publisher;
@@ -2796,6 +2810,8 @@ static void janus_videoroom_publisher_free(const janus_refcount *p_ref) {
 	g_free(p->user_id_str);
 	g_free(p->display);
 	g_free(p->recording_base);
+	if(p->metadata != NULL)
+		json_decref(p->metadata);
 	/* Get rid of all the streams */
 	g_list_free_full(p->streams, (GDestroyNotify)(janus_videoroom_publisher_stream_destroy));
 	g_hash_table_unref(p->streams_byid);
@@ -4315,6 +4331,8 @@ static void janus_videoroom_notify_about_publisher(janus_videoroom_publisher *p,
 		json_object_set_new(pl, "video", json_true());
 	if(p->screen_receiving)
 		json_object_set_new(pl, "screen", json_true());
+	if(p->metadata)
+		json_object_set_new(pl, "metadata", json_deep_copy(p->metadata));
 	/* Add proper info on all the streams */
 	gboolean audio_added = FALSE, video_added = FALSE;
 	json_t *media = json_array();
@@ -4389,6 +4407,8 @@ static void janus_videoroom_notify_about_publisher(janus_videoroom_publisher *p,
 		json_object_set_new(info, "id", string_ids ? json_string(p->user_id_str) : json_integer(p->user_id));
 		if(p->display)
 				json_object_set_new(info, "display", json_string(p->display));
+		if(p->metadata)
+				json_object_set_new(info, "metadata", json_deep_copy(p->metadata));
 		json_t *media = json_array();
 		GList *temp = p->streams;
 		while(temp) {
@@ -4433,6 +4453,9 @@ static void janus_videoroom_participant_joining(janus_videoroom_publisher *p) {
 		if (p->display) {
 			json_object_set_new(user, "display", json_string(p->display));
 		}
+		if (p->metadata) {
+			json_object_set_new(user, "metadata", json_deep_copy(p->metadata));
+		}
 		json_object_set_new(event, "videoroom", json_string("event"));
 		json_object_set_new(event, "room", string_ids ? json_string(p->room_id_str) : json_integer(p->room_id));
 		json_object_set_new(event, "joining", user);
@@ -4470,6 +4493,8 @@ static void janus_videoroom_leave_or_unpublish(janus_videoroom_publisher *partic
 	json_object_set_new(event, "room", string_ids ? json_string(participant->room_id_str) : json_integer(participant->room_id));
 	if(participant->display)
 		json_object_set_new(event, "display", json_string(participant->display));
+	if(participant->metadata)
+		json_object_set_new(event, "metadata", json_deep_copy(participant->metadata));
 	json_object_set_new(event, is_leaving ? (kicked ? "kicked" : "leaving") : "unpublished",
 		string_ids ? json_string(participant->user_id_str) : json_integer(participant->user_id));
 	janus_videoroom_notify_participants(participant, event, FALSE);
@@ -4481,6 +4506,8 @@ static void janus_videoroom_leave_or_unpublish(janus_videoroom_publisher *partic
 		json_object_set_new(info, "id", string_ids ? json_string(participant->user_id_str) : json_integer(participant->user_id));
 		if(participant->display)
 			json_object_set_new(info, "display", json_string(participant->display));
+		if(participant->metadata)
+			json_object_set_new(info, "metadata", json_deep_copy(participant->metadata));
 		gateway->notify_event(&janus_videoroom_plugin, NULL, info);
 	}
 	if(is_leaving) {
@@ -4592,6 +4619,8 @@ json_t *janus_videoroom_query_session(janus_plugin_session *handle) {
 				json_object_set_new(info, "private_id", json_integer(participant->pvt_id));
 				if(participant->display)
 					json_object_set_new(info, "display", json_string(participant->display));
+				if(participant->metadata)
+					json_object_set_new(info, "metadata", json_deep_copy(participant->metadata));
 				/* TODO Fix the summary of viewers, since everything is stream based now */
 				//~ if(participant->subscribers)
 					//~ json_object_set_new(info, "viewers", json_integer(g_slist_length(participant->subscribers)));
@@ -7056,6 +7085,8 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 				json_object_set_new(pl, "contour", json_string(p->contour));
 				json_object_set_new(pl, "contour_shared", p->contour_shared ? json_true() : json_false());
 			}
+			if(p->metadata)
+				json_object_set_new(pl, "metadata", json_deep_copy(p->metadata));
 			if(p->dummy)
 				json_object_set_new(pl, "dummy", json_true());
 			if(p->remote)
@@ -7139,6 +7170,8 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			json_object_set_new(pl, "publisher_id", string_ids ? json_string(p->user_id_str) : json_integer(p->user_id));
 			if(p->display)
 				json_object_set_new(pl, "display", json_string(p->display));
+			if(p->metadata)
+				json_object_set_new(pl, "metadata", json_deep_copy(p->metadata));
 			json_t *flist = json_array();
 			/* Iterate on all media streams to see what's being forwarded */
 			janus_videoroom_publisher_stream *ps = NULL;
@@ -7824,6 +7857,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		json_t *server_id = json_object_get(root, "server_id");
 		json_t *contour = json_object_get(root, "contour");
 		json_t *contour_shared = json_object_get(root, "contour_shared");
+		json_t *metadata = json_object_get(root, "metadata");
 		if(id) {
 			if(!string_ids) {
 				user_id = json_integer_value(id);
@@ -7960,7 +7994,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		publisher->legacy = FALSE;
         publisher->audio_latest_received = 0;
         publisher->video_latest_received = 0;
-
+		publisher->metadata = metadata ? json_deep_copy(metadata) : NULL;
 		pipe(publisher->pipefd);
 		janus_mutex_init(&publisher->subscribers_mutex);
 		janus_mutex_init(&publisher->own_subscriptions_mutex);
@@ -8265,13 +8299,21 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			goto prepare_response;
 		}
 		janus_refcount_increase(&publisher->ref);
-		/* Check if there's a new display, new streams, or changes to existing ones */
+		/* Check if there's a new display, new metadata, new streams, or changes to existing ones */
 		json_t *display = json_object_get(root, "display");
 		if(display) {
 			char *old_display = publisher->display;
 			char *new_display = g_strdup(json_string_value(display));
 			publisher->display = new_display;
 			g_free(old_display);
+		}
+		json_t *metadata = json_object_get(root, "metadata");
+		if(metadata) {
+			json_t *old_metadata = publisher->metadata;
+			json_t *new_metadata = json_deep_copy(metadata);
+			publisher->metadata = new_metadata;
+			if(old_metadata)
+				json_decref(old_metadata);
 		}
 		janus_mutex_lock(&publisher->streams_mutex);
 		janus_videoroom_publisher_stream *ps = NULL;
@@ -9786,6 +9828,7 @@ static void *janus_videoroom_handler(void *data) {
 					}
 				}
 				json_t *display = json_object_get(root, "display");
+				json_t *metadata= json_object_get(root, "metadata");
 				const char *display_text = display ? json_string_value(display) : NULL;
 				guint64 user_id = 0;
 				char user_id_num[30], *user_id_str = NULL;
@@ -9872,6 +9915,7 @@ static void *janus_videoroom_handler(void *data) {
 				publisher->contour = NULL;
 				publisher->contour_shared = TRUE;
 				publisher->legacy = FALSE;
+				publisher->metadata = NULL;
 				publisher->recording_active = FALSE;
 				publisher->recording_base = NULL;
 				publisher->firefox = FALSE;
@@ -9998,6 +10042,10 @@ static void *janus_videoroom_handler(void *data) {
 					publisher->legacy = json_is_true(legacy);
 					JANUS_LOG(LOG_VERB, "Setting legacy property: %s (room %s, user %s)\n",
 						publisher->legacy ? "true" : "false", publisher->room_id_str, publisher->user_id_str);
+				if(metadata) {
+					publisher->metadata = json_deep_copy(metadata);
+					JANUS_LOG(LOG_VERB, "Setting metadata: (room %s, user %s)\n",
+						publisher->room_id_str, publisher->user_id_str);
 				}
 				/* Done */
 				janus_mutex_lock(&session->mutex);
@@ -10057,6 +10105,8 @@ static void *janus_videoroom_handler(void *data) {
 						json_object_set_new(pl, "contour", json_string(p->contour));
 						json_object_set_new(pl, "contour_shared", p->contour_shared ? json_true() : json_false());
 					}
+					if(p->metadata)
+						json_object_set_new(pl, "metadata", json_deep_copy(p->metadata));
 					if(p->dummy)
 						json_object_set_new(pl, "dummy", json_true());
 					/* Add proper info on all the streams */
@@ -10909,6 +10959,7 @@ static void *janus_videoroom_handler(void *data) {
 				json_t *record = json_object_get(root, "record");
 				json_t *recfile = json_object_get(root, "filename");
 				json_t *display = json_object_get(root, "display");
+				json_t *metadata = json_object_get(root, "metadata");
 				json_t *update = json_object_get(root, "update");
 				json_t *user_audio_active_packets = json_object_get(root, "audio_active_packets");
 				json_t *user_audio_level_average = json_object_get(root, "audio_level_average");
@@ -11203,6 +11254,26 @@ static void *janus_videoroom_handler(void *data) {
 						json_decref(display_event);
 					}
 					g_free(old_display);
+					janus_mutex_unlock(&participant->room->mutex);
+				}
+				if(metadata) {
+					janus_mutex_lock(&participant->room->mutex);
+					char *old_metadata = participant->metadata;
+					char *new_metadata = json_deep_copy(metadata);
+					participant->metadata = new_metadata;
+					if(old_metadata != NULL) {
+						/* The metadata changed, notify this */
+						json_t *metadata_event = json_object();
+						json_object_set_new(metadata_event, "videoroom", json_string("event"));
+						json_object_set_new(metadata_event, "id", string_ids ?
+							json_string(participant->user_id_str) : json_integer(participant->user_id));
+						json_object_set_new(metadata_event, "metadata", json_deep_copy(participant->metadata));
+						if(participant->room && !g_atomic_int_get(&participant->room->destroyed)) {
+							janus_videoroom_notify_participants(participant, metadata_event, FALSE);
+						}
+						json_decref(metadata_event);
+						json_decref(old_metadata);
+					}
 					janus_mutex_unlock(&participant->room->mutex);
 				}
 				/* Are we updating the description? */
