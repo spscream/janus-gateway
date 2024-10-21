@@ -8911,7 +8911,6 @@ static void janus_videoroom_incoming_rtp_internal(janus_videoroom_session *sessi
 	}
 
 	if(ps->active && !ps->muted) {
-		participant->video_latest_received = now;
 		janus_rtp_header *rtp = (janus_rtp_header *)buf;
 		int sc = video ? 0 : -1;
 		/* Check if we're simulcasting, and if so, keep track of the "layer" */
@@ -9030,6 +9029,7 @@ static void janus_videoroom_incoming_rtp_internal(janus_videoroom_session *sessi
 
 		/* Check if we need to send any REMB, FIR or PLI back to this publisher */
 		if(video && ps->active && !ps->muted) {
+			participant->video_latest_received = now;
 			/* Did we send a REMB already, or is it time to send one? */
 			gboolean send_remb = FALSE;
 			if(participant->remb_latest == 0 && participant->remb_startup > 0) {
