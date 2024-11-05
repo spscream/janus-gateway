@@ -5810,7 +5810,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 				JANUS_VALIDATE_JSON_OBJECT(s, rtp_forward_stream_parameters,
 					error_code, error_cause, TRUE,
 					JANUS_VIDEOROOM_ERROR_MISSING_ELEMENT, JANUS_VIDEOROOM_ERROR_INVALID_ELEMENT);
-				if(error_code != 0);
+				if(error_code != 0)
 					goto prepare_response;
 				/* Make sure we have a host attribute, either global or stream-specific */
 				json_t *stream_host = json_object_get(s, "host");
