@@ -6975,6 +6975,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			/* Add proper info on all the streams */
 			gboolean audio_added = FALSE, video_added = FALSE, talking_found = FALSE, talking = FALSE;
 			json_t *media = json_array();
+			janus_mutex_lock(&p->streams_mutex);
 			GList *temp = p->streams;
 			while(temp) {
 				janus_videoroom_publisher_stream *ps = (janus_videoroom_publisher_stream *)temp->data;
@@ -7032,6 +7033,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 				json_array_append_new(media, info);
 				temp = temp->next;
 			}
+			janus_mutex_unlock(&p->streams_mutex);
 			json_object_set_new(pl, "streams", media);
 
 			if(talking_found)
@@ -9428,7 +9430,7 @@ void janus_videoroom_media_event(janus_plugin_session *handle, char *mid, gboole
 				janus_refcount_decrease(&session->ref);
 				return;
 			}
-
+			janus_mutex_lock(&publisher->mutex);
 			if(!video) {
 				publisher->audio_receiving = up;
 			}
@@ -9438,7 +9440,7 @@ void janus_videoroom_media_event(janus_plugin_session *handle, char *mid, gboole
 			if(video && !strcmp(mid, "0")) {
 				publisher->screen_receiving = up;
 			}
-
+			janus_mutex_unlock(&publisher->mutex);
 			janus_refcount_decrease(&publisher->ref);
 	}
 	janus_refcount_decrease(&session->ref);
