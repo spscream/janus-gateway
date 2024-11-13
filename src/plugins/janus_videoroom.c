@@ -6955,6 +6955,8 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			json_object_set_new(pl, "legacy", p->legacy ? json_true() : json_false());
 			if(p->display)
 				json_object_set_new(pl, "display", json_string(p->display));
+			if(p->metadata)
+				json_object_set_new(pl, "metadata", json_deep_copy(p->metadata));
 			if(p->server_id)
 				json_object_set_new(pl, "server_id", json_string(p->server_id));
 			if(p->contour) {
