@@ -383,6 +383,7 @@ void janus_rtp_forwarder_send_rtp_full(janus_rtp_forwarder *rf, char *buffer, in
 		memcpy(sbuf, buffer, len);
 		int protected = len;
 		int res = srtp_protect(rf->srtp_ctx, sbuf, &protected);
+
 		if(res != srtp_err_status_ok) {
 			janus_rtp_header *header = (janus_rtp_header *)sbuf;
 			guint32 timestamp = ntohl(header->timestamp);
