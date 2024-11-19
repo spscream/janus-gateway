@@ -1824,6 +1824,21 @@ static void janus_audiobridge_participant_clear_jitter_buffer(janus_audiobridge_
 	}
 }
 
+statiс void janus_audiobridge_participant_shrink_inbuf(janus_audiobridge_participant *participant, int shrink_size) {
+	for(int i = 0; i < shrink_size; i++) {
+		Glist *first = g_list_first(participant->inbuf);
+		janus_audiobridge_rtp_relay_packet *pkt = (janus_audiobridge_rtp_relay_packet *)first->data;
+		participant->inbuf = g_list_delete_link(participant->inbuf, first);
+		first = NULL;
+		if(pkt == NULL)
+			continue;
+		g_free(pkt->data);
+		pkt->data = NULL;
+		g_free(pkt);
+		pkt = NULL;
+	}
+}
+
 static void janus_audiobridge_participant_clear_inbuf(janus_audiobridge_participant *participant) {
 	while(participant->inbuf) {
 		GList *first = g_list_first(participant->inbuf);
@@ -2225,7 +2240,7 @@ static int janus_audiobridge_resample(int16_t *input, int input_num, int input_r
 #define JITTER_BUFFER_MAX_PACKETS 50
 #define JITTER_BUFFER_MAX_GAP_SIZE 20
 #define JITTER_BUFFER_CHECK_USECS 1*G_USEC_PER_SEC
-#define QUEUE_IN_MAX_PACKETS 4
+#define QUEUE_IN_MAX_PACKETS 10
 
 
 /* Error codes */
@@ -8946,8 +8961,9 @@ static void *janus_audiobridge_participant_thread(void *data) {
 						/* Do not let queue-in grow too much */
 						guint count = g_list_length(participant->inbuf);
 						if((int) count > QUEUE_IN_MAX_PACKETS) {
-							JANUS_LOG(LOG_WARN, "Participant queue-in contains too many packets, clearing now (count=%u)\n", count);
-							janus_audiobridge_participant_clear_inbuf(participant);
+							JANUS_LOG(LOG_WARN, "Participant queue-in contains too many packets, shrinking now (count=%u)\n", count);
+							//janus_audiobridge_participant_clear_inbuf(participant);
+							janus_audiobridge_participant_shrink_inbuf(participant, (int) count - QUEUE_IN_MAX_PACKETS);
 						}
 						participant->inbuf = g_list_append(participant->inbuf, pkt);
 						janus_mutex_unlock(&participant->qmutex);
@@ -9040,8 +9056,9 @@ static void *janus_audiobridge_participant_thread(void *data) {
 					/* Do not let queue-in grow too much */
 					guint count = g_list_length(participant->inbuf);
 					if(count > QUEUE_IN_MAX_PACKETS) {
-						JANUS_LOG(LOG_WARN, "Participant queue-in contains too many packets, clearing now (count=%u)\n", count);
-						janus_audiobridge_participant_clear_inbuf(participant);
+						JANUS_LOG(LOG_WARN, "Participant queue-in contains too many packets, shrinking now (count=%u)\n", count);
+						//janus_audiobridge_participant_clear_inbuf(participant);
+						janus_audiobridge_participant_shrink_inbuf(participant, (int) count - QUEUE_IN_MAX_PACKETS);
 					}
 					participant->inbuf = g_list_append(participant->inbuf, pkt);
 					janus_mutex_unlock(&participant->qmutex);
