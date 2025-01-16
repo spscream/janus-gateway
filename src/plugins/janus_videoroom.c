@@ -2559,7 +2559,7 @@ static void janus_videoroom_create_dummy_publisher(janus_videoroom *room, GHashT
 /* We support remote publishers as well, for which we use plain RTP,
  * which means we need to create and work with generic file descriptors */
 #define DEFAULT_RTP_RANGE_MIN 20000
-#define DEFAULT_RTP_RANGE_MAX 25000
+#define DEFAULT_RTP_RANGE_MAX 30000
 static uint16_t rtp_range_min = DEFAULT_RTP_RANGE_MIN;
 static uint16_t rtp_range_max = DEFAULT_RTP_RANGE_MAX;
 static uint16_t rtp_range_slider = DEFAULT_RTP_RANGE_MIN;
