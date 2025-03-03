@@ -2481,6 +2481,8 @@ typedef struct janus_videoroom_publisher {
 	gboolean screen_receiving;
 	gint64 audio_latest_received;
 	gint64 video_latest_received;
+	char *audio_mid;
+	char *video_mid;
 	volatile gint destroyed;
 	janus_refcount ref;
 } janus_videoroom_publisher;
@@ -2838,6 +2840,10 @@ static void janus_videoroom_publisher_free(const janus_refcount *p_ref) {
 	g_free(p->user_id_str);
 	g_free(p->display);
 	g_free(p->recording_base);
+	g_free(p->contour);
+	g_free(p->server_id);
+	g_free(p->audio_mid);
+	g_free(p->video_mid);
 	if(p->metadata != NULL)
 		json_decref(p->metadata);
 	/* Get rid of all the streams */
@@ -4489,6 +4495,26 @@ static void janus_videoroom_participant_joining(janus_videoroom_publisher *p) {
 		json_object_set_new(event, "joining", user);
 		janus_videoroom_notify_participants(p, event, FALSE);
 		/* user gets deref-ed by the owner event */
+		json_decref(event);
+	}
+}
+
+static void janus_videoroom_remote_publisher_media(janus_videoroom_publisher *p, gboolean is_video, gboolean receiving) {
+	if(p->room == NULL)
+		return;
+	if(!g_atomic_int_get(&p->room->destroyed))  {
+		json_t *event = json_object();
+
+		json_object_set_new(event, "videoroom", json_string("remote_media"));
+		json_object_set_new(event, "room", string_ids ? json_string(p->room_id_str) : json_integer(p->room_id));
+		json_object_set_new(event, "id", string_ids ? json_string(p->user_id_str) : json_integer(p->user_id));
+		json_object_set_new(event, "display", json_string(p->display));
+		json_object_set_new(event, "media", is_video ? json_string("video") : json_string("audio"));
+		json_object_set_new(event, "mid", is_video ? json_string(p->video_mid) : json_string(p->audio_mid));
+		json_object_set_new(event, "receiving", receiving ? json_true() : json_false());
+
+		janus_videoroom_notify_participants(p,  event, FALSE);
+
 		json_decref(event);
 	}
 }
@@ -9014,9 +9040,13 @@ static void janus_videoroom_incoming_rtp_internal(janus_videoroom_session *sessi
 	gint64 now = janus_get_monotonic_time();
 	ps->latest_received = now;
 
+	if(!video && ps->active && !ps->muted) {
+		participant->audio_latest_received = now;
+		participant->audio_mid  = ps->mid ? g_strdup(ps->mid) : NULL;
+	}
+
 	/* In case this is an audio packet and we're doing talk detection, check the audio level extension */
 	if(!video && videoroom->audiolevel_event && ps->active && !ps->muted && ps->audio_level_extmap_id > 0) {
-		participant->audio_latest_received = now;
 		int level = pkt->extensions.audio_level;
 		if(level != -1) {
 			ps->audio_dBov_sum += level;
@@ -9190,6 +9220,7 @@ static void janus_videoroom_incoming_rtp_internal(janus_videoroom_session *sessi
 		/* Check if we need to send any REMB, FIR or PLI back to this publisher */
 		if(video && ps->active && !ps->muted) {
 			participant->video_latest_received = now;
+			participant->video_mid  = ps->mid ? g_strdup(ps->mid) : NULL;
 			/* Did we send a REMB already, or is it time to send one? */
 			gboolean send_remb = FALSE;
 			if(participant->remb_latest == 0 && participant->remb_startup > 0) {
@@ -14189,6 +14220,8 @@ static void *janus_videoroom_remote_publisher_thread(void *user_data) {
 	janus_plugin_rtp pkt = { 0 };
 	janus_plugin_data data = { 0 };
 	GList *temp = NULL;
+	gint64 audio_receiving = 0;
+	gint64 video_receiving = 0;
 
 	/* As the first thing, we add the remote publisher to the list */
 	janus_mutex_lock(&videoroom->mutex);
@@ -14204,6 +14237,7 @@ static void *janus_videoroom_remote_publisher_thread(void *user_data) {
 	/* Loop */
 	int num = 0, i = 0;
 	while(!g_atomic_int_get(&publisher->remote_leaving) && !g_atomic_int_get(&publisher->destroyed) && !g_atomic_int_get(&videoroom->destroyed)) {
+		gint64 now = janus_get_monotonic_time();
 		/* Prepare poll */
 		num = 0;
 		if(publisher->remote_fd != -1) {
@@ -14251,6 +14285,22 @@ static void *janus_videoroom_remote_publisher_thread(void *user_data) {
 				videoroom->room_id_str, publisher->user_id_str, errno, g_strerror(errno));
 			break;
 		} else if(resfd == 0) {
+			if(audio_receiving > 0 && now - audio_receiving > 2*G_USEC_PER_SEC) {
+				JANUS_LOG(LOG_ERR, "remote publisher %s audio receiving: false \n", publisher->user_id_str);
+
+				janus_mutex_lock(&videoroom->mutex);
+				janus_videoroom_remote_publisher_media(publisher, FALSE, FALSE);
+				janus_mutex_unlock(&videoroom->mutex);
+				audio_receiving = 0;
+			}
+			if(video_receiving > 0 && now - video_receiving > 2*G_USEC_PER_SEC) {
+				JANUS_LOG(LOG_ERR, "remote publisher %s video receiving: false \n", publisher->user_id_str);
+
+				janus_mutex_lock(&videoroom->mutex);
+				janus_videoroom_remote_publisher_media(publisher, TRUE, FALSE);
+				janus_mutex_unlock(&videoroom->mutex);
+				video_receiving = 0;
+			}
 			/* No data, keep going */
 			continue;
 		}
@@ -14394,6 +14444,31 @@ static void *janus_videoroom_remote_publisher_thread(void *user_data) {
 				janus_videoroom_incoming_rtp_internal(publisher->session, publisher, &pkt);
 			}
 		}
+
+		if(audio_receiving == 0) {
+			if(now - publisher->audio_latest_received <= 2*G_USEC_PER_SEC) {
+				JANUS_LOG(LOG_ERR, "remote publisher %s audio receiving: true \n", publisher->user_id_str);
+				audio_receiving = publisher->audio_latest_received;
+
+				janus_mutex_lock(&videoroom->mutex);
+				janus_videoroom_remote_publisher_media(publisher, FALSE, TRUE);
+				janus_mutex_unlock(&videoroom->mutex);
+			}
+		}
+
+		if(video_receiving == 0) {
+			if(now - publisher->video_latest_received <= 2*G_USEC_PER_SEC) {
+				JANUS_LOG(LOG_ERR, "remote publisher %s video receiving: true \n", publisher->user_id_str);
+				video_receiving = publisher->video_latest_received;
+
+				janus_mutex_lock(&videoroom->mutex);
+				janus_videoroom_remote_publisher_media(publisher, TRUE, TRUE);
+				janus_mutex_unlock(&videoroom->mutex);
+			}
+		}
+
+		audio_receiving = publisher->audio_latest_received;
+		video_receiving = publisher->video_latest_received;
 	}
 cleanup:
 	/* If we got here, the remote publisher has been removed from the
