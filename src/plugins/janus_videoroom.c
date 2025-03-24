@@ -14454,6 +14454,8 @@ static void *janus_videoroom_remote_publisher_thread(void *user_data) {
 				janus_videoroom_remote_publisher_media(publisher, FALSE, TRUE);
 				janus_mutex_unlock(&videoroom->mutex);
 			}
+		} else {
+			audio_receiving = publisher->audio_latest_received;
 		}
 
 		if(video_receiving == 0) {
@@ -14465,10 +14467,9 @@ static void *janus_videoroom_remote_publisher_thread(void *user_data) {
 				janus_videoroom_remote_publisher_media(publisher, TRUE, TRUE);
 				janus_mutex_unlock(&videoroom->mutex);
 			}
+		} else {
+			video_receiving = publisher->video_latest_received;
 		}
-
-		audio_receiving = publisher->audio_latest_received;
-		video_receiving = publisher->video_latest_received;
 	}
 cleanup:
 	/* If we got here, the remote publisher has been removed from the
