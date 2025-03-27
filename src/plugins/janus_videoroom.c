@@ -14419,6 +14419,15 @@ static void *janus_videoroom_remote_publisher_thread(void *user_data) {
 			}
 		} else {
 			audio_receiving = publisher->audio_latest_received;
+
+			if(now - audio_receiving > 2*G_USEC_PER_SEC) {
+				JANUS_LOG(LOG_ERR, "remote publisher %s audio receiving: false \n", publisher->user_id_str);
+
+				janus_mutex_lock(&videoroom->mutex);
+				janus_videoroom_remote_publisher_media(publisher, FALSE, FALSE);
+				janus_mutex_unlock(&videoroom->mutex);
+				audio_receiving = 0;
+			}
 		}
 
 		if(video_receiving == 0) {
@@ -14432,6 +14441,15 @@ static void *janus_videoroom_remote_publisher_thread(void *user_data) {
 			}
 		} else {
 			video_receiving = publisher->video_latest_received;
+
+			if(now - video_receiving > 2*G_USEC_PER_SEC) {
+				JANUS_LOG(LOG_ERR, "remote publisher %s video receiving: false \n", publisher->user_id_str);
+
+				janus_mutex_lock(&videoroom->mutex);
+				janus_videoroom_remote_publisher_media(publisher, TRUE, FALSE);
+				janus_mutex_unlock(&videoroom->mutex);
+				video_receiving = 0;
+			}
 		}
 	}
 cleanup:
