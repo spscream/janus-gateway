@@ -9034,7 +9034,9 @@ static void janus_videoroom_incoming_rtp_internal(janus_videoroom_session *sessi
 
 	if(!video && ps->active && !ps->muted) {
 		participant->audio_latest_received = now;
-		participant->audio_mid  = ps->mid ? g_strdup(ps->mid) : NULL;
+		if(!participant->audio_mid) {
+			participant->audio_mid  = ps->mid ? g_strdup(ps->mid) : NULL;
+		}
 	}
 
 	/* In case this is an audio packet and we're doing talk detection, check the audio level extension */
@@ -9212,7 +9214,9 @@ static void janus_videoroom_incoming_rtp_internal(janus_videoroom_session *sessi
 		/* Check if we need to send any REMB, FIR or PLI back to this publisher */
 		if(video && ps->active && !ps->muted) {
 			participant->video_latest_received = now;
-			participant->video_mid  = ps->mid ? g_strdup(ps->mid) : NULL;
+			if(!participant->video_mid) {
+				participant->video_mid  = ps->mid ? g_strdup(ps->mid) : NULL;
+			}
 			/* Did we send a REMB already, or is it time to send one? */
 			gboolean send_remb = FALSE;
 			if(participant->remb_latest == 0 && participant->remb_startup > 0) {
