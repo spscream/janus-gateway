@@ -2887,20 +2887,22 @@ static void janus_videoroom_room_dereference(janus_videoroom *room) {
 }
 
 static void janus_videoroom_room_destroy(janus_videoroom *room) {
-	if(room && g_atomic_int_compare_and_exchange(&room->destroyed, 0, 1))
+	if(room && g_atomic_int_compare_and_exchange(&room->destroyed, 0, 1)) {
+		GList *l = room->threads;
+		while(l) {
+			janus_videoroom_helper *ht = (janus_videoroom_helper *)l->data;
+			g_async_queue_push(ht->queued_packets, &exit_packet);
+			janus_videoroom_helper_destroy(ht);
+			l = l->next;
+		}
+
 		janus_refcount_decrease(&room->ref);
+	}
 }
 
 static void janus_videoroom_room_free(const janus_refcount *room_ref) {
 	janus_videoroom *room = janus_refcount_containerof(room_ref, janus_videoroom, ref);
 	/* This room can be destroyed, free all the resources */
-	GList *l = room->threads;
-	while(l) {
-		janus_videoroom_helper *ht = (janus_videoroom_helper *)l->data;
-		g_async_queue_push(ht->queued_packets, &exit_packet);
-		janus_videoroom_helper_destroy(ht);
-		l = l->next;
-	}
 	g_list_free(room->threads);
 	g_free(room->room_id_str);
 	g_free(room->room_name);
@@ -3360,6 +3362,8 @@ static janus_videoroom_subscriber_stream *janus_videoroom_subscriber_stream_add(
 		}
 		janus_mutex_lock(&helper->mutex);
 		GList *list = g_hash_table_lookup(helper->subscribers, ps);
+		janus_refcount_increase(&stream->ref);
+		janus_refcount_increase(&ps->ref);
 		list = g_list_append(list, stream);
 		g_hash_table_insert(helper->subscribers, ps, list);
 		helper->num_subscribers++;
@@ -3408,6 +3412,8 @@ static janus_videoroom_subscriber_stream *janus_videoroom_subscriber_stream_add_
 						l = l->next;
 					}
 					janus_mutex_lock(&helper->mutex);
+					janus_refcount_increase(&stream->ref);
+					janus_refcount_increase(&ps->ref);
 					GList *list = g_hash_table_lookup(helper->subscribers, ps);
 					list = g_list_append(list, stream);
 					g_hash_table_insert(helper->subscribers, ps, list);
@@ -3469,6 +3475,8 @@ static janus_videoroom_subscriber_stream *janus_videoroom_subscriber_stream_add_
 							l = l->next;
 						}
 						janus_mutex_lock(&helper->mutex);
+						janus_refcount_increase(&stream->ref);
+						janus_refcount_increase(&ps->ref);
 						GList *list = g_hash_table_lookup(helper->subscribers, ps);
 						list = g_list_append(list, stream);
 						g_hash_table_insert(helper->subscribers, ps, list);
@@ -3524,6 +3532,8 @@ static void janus_videoroom_subscriber_stream_remove(janus_videoroom_subscriber_
 						ht->num_subscribers--;
 						list = g_list_remove_all(list, s);
 						g_hash_table_insert(ht->subscribers, ps, list);
+						janus_refcount_decrease(&ps->ref);
+						janus_refcount_decrease(&s->ref);
 						JANUS_LOG(LOG_VERB, "Removing subscriber stream from helper thread #%d (%d subscribers)\n",
 							ht->id, ht->num_subscribers);
 						janus_mutex_unlock(&ht->mutex);
@@ -5040,6 +5050,11 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		videoroom->fir_freq = 0;
 		if(fir_freq)
 			videoroom->fir_freq = json_integer_value(fir_freq);
+
+		g_atomic_int_set(&videoroom->destroyed, 0);
+		janus_mutex_init(&videoroom->mutex);
+		janus_refcount_init(&videoroom->ref, janus_videoroom_room_free);
+
 		/* If we need helper threads, spawn them now */
 		videoroom->helper_threads = json_integer_value(threads);;
 		if(videoroom->helper_threads > 0) {
@@ -5191,9 +5206,6 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		if(lock_record) {
 			videoroom->lock_record = json_is_true(lock_record);
 		}
-		g_atomic_int_set(&videoroom->destroyed, 0);
-		janus_mutex_init(&videoroom->mutex);
-		janus_refcount_init(&videoroom->ref, janus_videoroom_room_free);
 		videoroom->participants = g_hash_table_new_full(string_ids ? g_str_hash : g_int64_hash, string_ids ? g_str_equal : g_int64_equal,
 			(GDestroyNotify)g_free, (GDestroyNotify)janus_videoroom_publisher_dereference);
 		videoroom->private_ids = g_hash_table_new(NULL, NULL);
@@ -10802,6 +10814,8 @@ static void *janus_videoroom_handler(void *data) {
 										l = l->next;
 									}
 									janus_mutex_lock(&helper->mutex);
+									janus_refcount_increase(&data_stream->ref);
+									janus_refcount_increase(&ps->ref);
 									GList *list = g_hash_table_lookup(helper->subscribers, ps);
 									list = g_list_append(list, data_stream);
 									g_hash_table_insert(helper->subscribers, ps, list);
@@ -10889,6 +10903,8 @@ static void *janus_videoroom_handler(void *data) {
 											l = l->next;
 										}
 										janus_mutex_lock(&helper->mutex);
+										janus_refcount_increase(&data_stream->ref);
+										janus_refcount_increase(&ps->ref);
 										GList *list = g_hash_table_lookup(helper->subscribers, ps);
 										list = g_list_append(list, data_stream);
 										g_hash_table_insert(helper->subscribers, ps, list);
@@ -12774,6 +12790,8 @@ static void *janus_videoroom_handler(void *data) {
 									ht->num_subscribers--;
 									list = g_list_remove_all(list, s);
 									g_hash_table_insert(ht->subscribers, ps, list);
+									janus_refcount_decrease(&ps->ref);
+									janus_refcount_decrease(&stream->ref);
 									JANUS_LOG(LOG_VERB, "Removing subscriber stream from helper thread #%d (%d subscribers)\n",
 										ht->id, ht->num_subscribers);
 									janus_mutex_unlock(&ht->mutex);
@@ -12805,6 +12823,8 @@ static void *janus_videoroom_handler(void *data) {
 							l = l->next;
 						}
 						janus_mutex_lock(&helper->mutex);
+						janus_refcount_increase(&stream->ref);
+						janus_refcount_increase(&ps->ref);
 						GList *list = g_hash_table_lookup(helper->subscribers, ps);
 						list = g_list_append(list, stream);
 						g_hash_table_insert(helper->subscribers, ps, list);
@@ -13678,10 +13698,19 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 			!stream->subscriber->session || !stream->subscriber->session->handle ||
 			!g_atomic_int_get(&stream->subscriber->session->started))
 		return;
+
+	if(stream)
+		janus_refcount_increase(&stream->ref);
 	janus_videoroom_publisher_stream *ps = stream->publisher_streams ?
 		stream->publisher_streams->data : NULL;
-	if(ps != packet->source || ps == NULL)
+	if(ps != packet->source || ps == NULL) {
+		janus_refcount_decrease(&stream->ref);
 		return;
+	}
+
+	if(ps)
+		janus_refcount_increase(&ps->ref);
+
 	janus_videoroom_subscriber *subscriber = stream->subscriber;
 	janus_videoroom_session *session = subscriber->session;
 
@@ -13692,8 +13721,11 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 			/* Handle SVC: make sure we have a payload to work with */
 			int plen = 0;
 			char *payload = janus_rtp_payload((char *)packet->data, packet->length, &plen);
-			if(payload == NULL)
+			if(payload == NULL) {
+				janus_refcount_decrease(&ps->ref);
+				janus_refcount_decrease(&stream->ref);
 				return;
+			}
 			/* Process this packet: don't relay if it's not the layer we wanted to handle */
 			char rtph[12];
 			memcpy(&rtph, packet->data, sizeof(rtph));
@@ -13706,8 +13738,11 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 				janus_videoroom_reqpli(ps, "SVC change");
 			}
 			/* Do we need to drop this? */
-			if(!relay)
+			if(!relay) {
+				janus_refcount_decrease(&ps->ref);
+				janus_refcount_decrease(&stream->ref);
 				return;
+			}
 			/* Any event we should notify? */
 			if(stream->svc_context.changed_spatial) {
 				/* Notify the user about the spatial layer change */
@@ -13747,8 +13782,11 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 			/* Handle simulcast: make sure we have a payload to work with */
 			int plen = 0;
 			char *payload = janus_rtp_payload((char *)packet->data, packet->length, &plen);
-			if(payload == NULL)
+			if(payload == NULL) {
+				janus_refcount_decrease(&ps->ref);
+				janus_refcount_decrease(&stream->ref);
 				return;
+			}
 			/* Process this packet: don't relay if it's not the SSRC/layer we wanted to handle */
 			gboolean relay = janus_rtp_simulcasting_context_process_rtp(&stream->sim_context,
 				(char *)packet->data, packet->length, packet->extensions.dd_content, packet->extensions.dd_len,
@@ -13766,8 +13804,11 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 				janus_videoroom_reqpli(ps, "Simulcast change");
 			}
 			/* Do we need to drop this? */
-			if(!relay)
+			if(!relay) {
+				janus_refcount_decrease(&ps->ref);
+				janus_refcount_decrease(&stream->ref);
 				return;
+			}
 			/* Any event we should notify? */
 			if(stream->sim_context.changed_substream) {
 				/* Notify the user about the substream change */
@@ -13845,6 +13886,12 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 		packet->data->timestamp = htonl(packet->timestamp);
 		packet->data->seq_number = htons(packet->seq_number);
 	}
+
+	if(ps)
+		janus_refcount_decrease(&ps->ref);
+
+	if(stream)
+		janus_refcount_decrease(&stream->ref);
 
 	return;
 }
