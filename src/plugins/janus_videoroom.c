@@ -13699,17 +13699,10 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 			!g_atomic_int_get(&stream->subscriber->session->started))
 		return;
 
-	if(stream)
-		janus_refcount_increase(&stream->ref);
 	janus_videoroom_publisher_stream *ps = stream->publisher_streams ?
 		stream->publisher_streams->data : NULL;
-	if(ps != packet->source || ps == NULL) {
-		janus_refcount_decrease(&stream->ref);
+	if(ps != packet->source || ps == NULL)
 		return;
-	}
-
-	if(ps)
-		janus_refcount_increase(&ps->ref);
 
 	janus_videoroom_subscriber *subscriber = stream->subscriber;
 	janus_videoroom_session *session = subscriber->session;
@@ -13721,11 +13714,8 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 			/* Handle SVC: make sure we have a payload to work with */
 			int plen = 0;
 			char *payload = janus_rtp_payload((char *)packet->data, packet->length, &plen);
-			if(payload == NULL) {
-				janus_refcount_decrease(&ps->ref);
-				janus_refcount_decrease(&stream->ref);
+			if(payload == NULL)
 				return;
-			}
 			/* Process this packet: don't relay if it's not the layer we wanted to handle */
 			char rtph[12];
 			memcpy(&rtph, packet->data, sizeof(rtph));
@@ -13738,11 +13728,8 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 				janus_videoroom_reqpli(ps, "SVC change");
 			}
 			/* Do we need to drop this? */
-			if(!relay) {
-				janus_refcount_decrease(&ps->ref);
-				janus_refcount_decrease(&stream->ref);
+			if(!relay)
 				return;
-			}
 			/* Any event we should notify? */
 			if(stream->svc_context.changed_spatial) {
 				/* Notify the user about the spatial layer change */
@@ -13782,11 +13769,8 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 			/* Handle simulcast: make sure we have a payload to work with */
 			int plen = 0;
 			char *payload = janus_rtp_payload((char *)packet->data, packet->length, &plen);
-			if(payload == NULL) {
-				janus_refcount_decrease(&ps->ref);
-				janus_refcount_decrease(&stream->ref);
+			if(payload == NULL)
 				return;
-			}
 			/* Process this packet: don't relay if it's not the SSRC/layer we wanted to handle */
 			gboolean relay = janus_rtp_simulcasting_context_process_rtp(&stream->sim_context,
 				(char *)packet->data, packet->length, packet->extensions.dd_content, packet->extensions.dd_len,
@@ -13804,11 +13788,8 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 				janus_videoroom_reqpli(ps, "Simulcast change");
 			}
 			/* Do we need to drop this? */
-			if(!relay) {
-				janus_refcount_decrease(&ps->ref);
-				janus_refcount_decrease(&stream->ref);
+			if(!relay)
 				return;
-			}
 			/* Any event we should notify? */
 			if(stream->sim_context.changed_substream) {
 				/* Notify the user about the substream change */
@@ -13886,12 +13867,6 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 		packet->data->timestamp = htonl(packet->timestamp);
 		packet->data->seq_number = htons(packet->seq_number);
 	}
-
-	if(ps)
-		janus_refcount_decrease(&ps->ref);
-
-	if(stream)
-		janus_refcount_decrease(&stream->ref);
 
 	return;
 }
