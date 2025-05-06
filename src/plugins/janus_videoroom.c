@@ -5072,7 +5072,6 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 				/* Spawn a thread and add references */
 				g_snprintf(tname, sizeof(tname), "vhelp %u-%s", helper->id, videoroom->room_id_str);
 				janus_refcount_increase(&videoroom->ref);
-				janus_refcount_increase(&helper->ref);
 				helper->thread = g_thread_try_new(tname, &janus_videoroom_helper_thread, helper, &error);
 				if(error != NULL) {
 					/* TODO Should this be a hard failure? */
