@@ -7207,8 +7207,12 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 				if(talking_found)
 					json_object_set_new(pl, "talking", talking ? json_true() : json_false());
 			}
-			if(list_streams)
+			if(list_streams) {
 				json_object_set_new(pl, "streams", media);
+			} else {
+				json_decref(media);
+			}
+
 			json_array_append_new(list, pl);
 		}
 		janus_mutex_unlock(&videoroom->mutex);
