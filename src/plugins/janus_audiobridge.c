@@ -1226,6 +1226,7 @@ room-<unique room ID>: {
 #include <netdb.h>
 #include <sys/time.h>
 #include <poll.h>
+#include <math.h>
 
 #include "../debug.h"
 #include "../apierror.h"
@@ -1860,7 +1861,9 @@ static void janus_audiobridge_buffer_packet_destroy(janus_audiobridge_buffer_pac
 }
 
 static void janus_audiobridge_participant_istalking(janus_audiobridge_session *session,
-	janus_audiobridge_participant *participant, janus_plugin_rtp *packet, gboolean *silence);
+	janus_audiobridge_participant *participant, janus_plugin_rtp *packet, gboolean *silence, int pcm_level);
+
+static int janus_audiobridge_level_from_pcm(const opus_int16 *samples, int num_samples);
 
 static void janus_audiobridge_participant_clear_jitter_buffer(janus_audiobridge_participant *participant) {
 	if(participant->jitter) {
@@ -9186,7 +9189,7 @@ static void *janus_audiobridge_participant_thread(void *data) {
 						pkt->silence = FALSE;
 						pkt->length = opus_decode(participant->decoder, NULL, 0, (opus_int16 *)pkt->data, output_samples, 0);
 						janus_mutex_unlock(&participant->decoding_mutex);
-						janus_audiobridge_participant_istalking(session, participant, NULL, NULL);
+						janus_audiobridge_participant_istalking(session, participant, NULL, NULL, -1);
 #ifdef HAVE_RNNOISE
 						/* Check if we need to denoise this packet */
 						if(participant->denoise)
@@ -9213,7 +9216,7 @@ static void *janus_audiobridge_participant_thread(void *data) {
 						janus_mutex_unlock(&participant->qmutex);
 					} else {
 						/* No packet in the jitter buffer? Move on the talking detection, if needed */
-						janus_audiobridge_participant_istalking(session, participant, NULL, NULL);
+						janus_audiobridge_participant_istalking(session, participant, NULL, NULL, -1);
 					}
 				} else {
 					/* Decode the audio packet */
@@ -9240,7 +9243,7 @@ static void *janus_audiobridge_participant_thread(void *data) {
 					pkt->seq_number = ntohs(rtp->seq_number);
 					/* Check the audio level extension to see if this is silence */
 					pkt->silence = FALSE;
-					janus_audiobridge_participant_istalking(session, participant, bpkt->rtp, &pkt->silence);
+					janus_audiobridge_participant_istalking(session, participant, bpkt->rtp, &pkt->silence, -1);
 					pkt->length = 0;
 					if(participant->codec == JANUS_AUDIOCODEC_OPUS) {
 						/* Opus */
@@ -9280,6 +9283,24 @@ static void *janus_audiobridge_participant_thread(void *data) {
 					if(participant->denoise)
 						janus_audiobridge_participant_denoise(participant, (char *)pkt->data, pkt->length);
 #endif
+					/* When participant has no audiolevel RTP extension (e.g. Plain RTP/SIP), compute level from PCM for talking detection */
+					if(participant->extmap_id < 1 && participant->room && participant->room->audiolevel_event && pkt->length > 0) {
+						int num_samples = (participant->codec == JANUS_AUDIOCODEC_OPUS) ? pkt->length : (pkt->length / 2);
+						if(num_samples > 0) {
+							int pcm_level = janus_audiobridge_level_from_pcm((opus_int16 *)pkt->data, num_samples);
+							janus_audiobridge_participant_istalking(session, participant, NULL, &pkt->silence, pcm_level);
+						}
+					}
+					/* For verification: when participant has extension, also compute PCM and log both (extension vs PCM) */
+					if(participant->extmap_id >= 1 && pkt->length > 0) {
+						int num_samples = (participant->codec == JANUS_AUDIOCODEC_OPUS) ? pkt->length : (pkt->length / 2);
+						if(num_samples > 0) {
+							int pcm_level = janus_audiobridge_level_from_pcm((opus_int16 *)pkt->data, num_samples);
+							JANUS_LOG(LOG_INFO, "[AudioBridge] level comparison participant %s audiolevel_extension=%d pcm=%d\n",
+								participant->user_id_str ? participant->user_id_str : "?",
+								participant->dBov_level, pcm_level);
+						}
+					}
 					/* Get rid of the buffered packet */
 					janus_audiobridge_buffer_packet_destroy(bpkt);
 					/* Update the details */
@@ -9641,14 +9662,49 @@ static void *janus_audiobridge_plainrtp_relay_thread(void *data) {
 	return NULL;
 }
 
+/* Compute 0-127 audio level from PCM (RFC 6464 scale: 0=loud, 127=silence). Used only when participant has no audiolevel RTP extension. */
+static int janus_audiobridge_level_from_pcm(const opus_int16 *samples, int num_samples) {
+	if(!samples || num_samples <= 0)
+		return 127;
+	int64_t sum = 0;
+	for(int i = 0; i < num_samples; i++) {
+		int s = (int)samples[i];
+		sum += (int64_t)s * s;
+	}
+	double rms = sqrt((double)sum / (double)num_samples);
+	if(rms < 1.0)
+		return 127;
+	double db = 20.0 * log10(rms / 32768.0);
+	int level = (int)(-db);
+	if(level < 0)
+		level = 0;
+	if(level > 127)
+		level = 127;
+	return level;
+}
+
 static void janus_audiobridge_participant_istalking(janus_audiobridge_session *session,
-		janus_audiobridge_participant *participant, janus_plugin_rtp *packet, gboolean *silence) {
+		janus_audiobridge_participant *participant, janus_plugin_rtp *packet, gboolean *silence, int pcm_level) {
 	/* Check the audio levels, in case we need to notify participants about who's talking */
-	if(participant == NULL || participant->extmap_id < 1)
+	if(participant == NULL)
 		return;
-	int level = packet ? packet->extensions.audio_level : 127;
-	if(level == -1)
+	int level;
+	if(participant->extmap_id >= 1 && packet && packet->extensions.audio_level != -1) {
+		/* Use RTP audio level extension when available */
+		level = packet->extensions.audio_level;
+	} else if(pcm_level >= 0) {
+		/* No extension: use level computed from PCM (e.g. Plain RTP / SIP) */
+		level = pcm_level;
+	} else {
 		return;
+	}
+	/* Unconditional logging for verification: what came from extension vs PCM */
+	{
+		gboolean from_ext = (participant->extmap_id >= 1 && packet && packet->extensions.audio_level != -1);
+		JANUS_LOG(LOG_INFO, "[AudioBridge] level participant %s level=%d (from %s)\n",
+			participant->user_id_str ? participant->user_id_str : "?",
+			level, from_ext ? "audiolevel_extension" : "PCM");
+	}
 	if(level == 127 && silence)
 		*silence = TRUE;
 	if(participant->room && participant->room->audiolevel_event) {
