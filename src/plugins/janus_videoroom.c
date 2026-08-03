@@ -12677,19 +12677,27 @@ static void *janus_videoroom_handler(void *data) {
 					janus_mutex_lock(&subscriber->room->mutex);
 					janus_videoroom_publisher *publisher = g_hash_table_lookup(subscriber->room->participants,
 						string_ids ? (gpointer)feed_id_str : (gpointer)&feed_id);
+					if(publisher) {
+						/* Pin before unlock: room mutex does not keep the publisher alive. */
+						janus_refcount_increase(&publisher->ref);
+						janus_refcount_increase(&publisher->session->ref);
+					}
 					janus_mutex_unlock(&subscriber->room->mutex);
 					if(publisher == NULL || g_atomic_int_get(&publisher->destroyed) ||
 							!g_atomic_int_get(&publisher->session->started)) {
 						JANUS_LOG(LOG_ERR, "No such feed (%s)\n", feed_id_str);
 						error_code = JANUS_VIDEOROOM_ERROR_NO_SUCH_FEED;
 						g_snprintf(error_cause, 512, "No such feed (%s)", feed_id_str);
+						if(publisher) {
+							janus_refcount_decrease(&publisher->session->ref);
+							janus_refcount_decrease(&publisher->ref);
+						}
 						janus_refcount_decrease(&subscriber->ref);
 						goto error;
 					}
 					/* Create a fake "streams" list out of this publisher */
 					feeds = json_array();
 					json_object_set_new(root, "streams", feeds);
-					janus_refcount_increase(&publisher->ref);
 					janus_mutex_lock(&publisher->streams_mutex);
 					GList *temp = publisher->streams, *touched_already = NULL;
 					while(temp) {
@@ -12698,7 +12706,7 @@ static void *janus_videoroom_handler(void *data) {
 						janus_videoroom_subscriber_stream *stream = NULL;
 						GList *temp2 = subscriber->streams;
 						while(temp2) {
-							stream = (janus_videoroom_subscriber_stream *)temp->data;
+							stream = (janus_videoroom_subscriber_stream *)temp2->data;
 							if(stream->type == ps->type && !g_list_find(touched_already, stream) &&
 									((stream->type == JANUS_VIDEOROOM_MEDIA_AUDIO && stream->acodec == ps->acodec) ||
 									(stream->type == JANUS_VIDEOROOM_MEDIA_VIDEO && stream->vcodec == ps->vcodec))) {
@@ -12720,6 +12728,7 @@ static void *janus_videoroom_handler(void *data) {
 					}
 					janus_mutex_unlock(&publisher->streams_mutex);
 					g_list_free(touched_already);
+					janus_refcount_decrease(&publisher->session->ref);
 					janus_refcount_decrease(&publisher->ref);
 					/* Take note of the fact this is a legacy request */
 					JANUS_LOG(LOG_WARN, "Deprecated VideoRoom 'switch' API: please start looking into the new one for the future\n");
@@ -12989,6 +12998,22 @@ static void *janus_videoroom_handler(void *data) {
 
 					/* Subscribe to the new one */
 					janus_mutex_lock(&ps->subscribers_mutex);
+					/* Re-check under the same mutex used for linking: cleanup may have
+					 * started after validation pinned this stream. */
+					janus_videoroom_publisher *ps_pub = ps->publisher;
+					if(g_atomic_int_get(&ps->destroyed) || ps_pub == NULL ||
+							g_atomic_int_get(&ps_pub->destroyed) ||
+							ps_pub->session == NULL ||
+							!g_atomic_int_get(&ps_pub->session->started)) {
+						janus_mutex_unlock(&ps->subscribers_mutex);
+						JANUS_LOG(LOG_WARN, "Publisher '%s'/'%s' went away during switch, leaving mid '%s' inactive\n",
+							feed_id_str, mid, sub_mid);
+						update = TRUE;
+						if(unref)
+							janus_refcount_decrease(&stream->ref);
+						janus_refcount_decrease(&stream->ref);
+						continue;
+					}
 					stream->publisher_streams = g_slist_append(stream->publisher_streams, ps);
 					ps->subscribers = g_slist_append(ps->subscribers, stream);
 					janus_videoroom_ref_subscriber_for_ps_link(subscriber);
