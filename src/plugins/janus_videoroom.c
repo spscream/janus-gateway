@@ -3566,6 +3566,7 @@ static void janus_videoroom_subscriber_stream_remove(janus_videoroom_subscriber_
 			if(lock_ps)
 				janus_mutex_lock(&ps->subscribers_mutex);
 			gboolean unref_ps = FALSE, unref_ss = FALSE, unref_subscriber = FALSE;
+			janus_videoroom_subscriber *subscriber = s->subscriber;
 			if(g_slist_find(s->publisher_streams, ps) != NULL) {
 				s->publisher_streams = g_slist_remove(s->publisher_streams, ps);
 				unref_ps = TRUE;
@@ -3579,8 +3580,8 @@ static void janus_videoroom_subscriber_stream_remove(janus_videoroom_subscriber_
 				unref_subscriber = TRUE;
 			}
 			/* Remove the subscriber from the helper threads too, if any */
-			if(s->subscriber && s->subscriber->room && s->subscriber->room->helper_threads > 0) {
-				GList *l = s->subscriber->room->threads;
+			if(subscriber && subscriber->room && subscriber->room->helper_threads > 0) {
+				GList *l = subscriber->room->threads;
 				while(l) {
 					janus_videoroom_helper *ht = (janus_videoroom_helper *)l->data;
 					janus_mutex_lock(&ht->mutex);
@@ -3607,7 +3608,7 @@ static void janus_videoroom_subscriber_stream_remove(janus_videoroom_subscriber_
 				janus_refcount_decrease(&s->ref);
 			/* Drop membership ref after unlock — free must not run under subscribers_mutex */
 			if(unref_subscriber)
-				janus_videoroom_unref_subscriber_for_ps_link(s->subscriber);
+				janus_videoroom_unref_subscriber_for_ps_link(subscriber);
 		}
 	} else {
 		/* Unsubscribe from all sources (which will be one for audio/video, potentially more for datachannels) */
@@ -12904,27 +12905,32 @@ static void *janus_videoroom_handler(void *data) {
 					changes++;
 					/* Unsubscribe from the previous source first */
 					janus_refcount_increase(&stream->ref);
+					/* Only drop list-side stream ref if we actually removed from ps->subscribers.
+					 * Publisher cleanup may have cleared that list already and will unref itself. */
 					gboolean unref = FALSE;
 					if(stream->publisher_streams == NULL) {
 						/* This stream was inactive, we'll need a renegotiation */
 						update = TRUE;
 					} else {
-						unref = TRUE;
 						janus_videoroom_publisher_stream *stream_ps = stream->publisher_streams->data;
 						janus_mutex_lock(&stream_ps->subscribers_mutex);
-						stream_ps->subscribers = g_slist_remove(stream_ps->subscribers, stream);
-						stream->publisher_streams = g_slist_remove(stream->publisher_streams, stream_ps);
+						gboolean removed_from_ps = (g_slist_find(stream_ps->subscribers, stream) != NULL);
+						gboolean removed_from_ss = (g_slist_find(stream->publisher_streams, stream_ps) != NULL);
+						if(removed_from_ps)
+							stream_ps->subscribers = g_slist_remove(stream_ps->subscribers, stream);
+						if(removed_from_ss)
+							stream->publisher_streams = g_slist_remove(stream->publisher_streams, stream_ps);
 						/* Remove the subscriber from the helper threads too, if any */
 						if(subscriber->room && subscriber->room->helper_threads > 0) {
 							GList *l = subscriber->room->threads;
 							while(l) {
 								janus_videoroom_helper *ht = (janus_videoroom_helper *)l->data;
 								janus_mutex_lock(&ht->mutex);
-								GList *list = g_hash_table_lookup(ht->subscribers, ps);
-								if(g_list_find(list, s) != NULL) {
+								GList *list = g_hash_table_lookup(ht->subscribers, stream_ps);
+								if(g_list_find(list, stream) != NULL) {
 									ht->num_subscribers--;
-									list = g_list_remove_all(list, s);
-									g_hash_table_insert(ht->subscribers, ps, list);
+									list = g_list_remove_all(list, stream);
+									g_hash_table_insert(ht->subscribers, stream_ps, list);
 									JANUS_LOG(LOG_VERB, "Removing subscriber stream from helper thread #%d (%d subscribers)\n",
 										ht->id, ht->num_subscribers);
 									janus_mutex_unlock(&ht->mutex);
@@ -12935,8 +12941,12 @@ static void *janus_videoroom_handler(void *data) {
 							}
 						}
 						janus_mutex_unlock(&stream_ps->subscribers_mutex);
-						janus_refcount_decrease(&stream_ps->ref);
-						janus_videoroom_unref_subscriber_for_ps_link(subscriber);
+						if(removed_from_ss)
+							janus_refcount_decrease(&stream_ps->ref);
+						if(removed_from_ps) {
+							unref = TRUE;
+							janus_videoroom_unref_subscriber_for_ps_link(subscriber);
+						}
 					}
 
 					/* Subscribe to the new one */
