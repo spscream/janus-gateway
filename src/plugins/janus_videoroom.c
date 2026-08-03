@@ -12699,6 +12699,7 @@ static void *janus_videoroom_handler(void *data) {
 					feeds = json_array();
 					json_object_set_new(root, "streams", feeds);
 					janus_mutex_lock(&publisher->streams_mutex);
+					janus_mutex_lock(&subscriber->streams_mutex);
 					GList *temp = publisher->streams, *touched_already = NULL;
 					while(temp) {
 						janus_videoroom_publisher_stream *ps = (janus_videoroom_publisher_stream *)temp->data;
@@ -12726,6 +12727,7 @@ static void *janus_videoroom_handler(void *data) {
 						}
 						temp = temp->next;
 					}
+					janus_mutex_unlock(&subscriber->streams_mutex);
 					janus_mutex_unlock(&publisher->streams_mutex);
 					g_list_free(touched_already);
 					janus_refcount_decrease(&publisher->session->ref);
@@ -12999,8 +13001,11 @@ static void *janus_videoroom_handler(void *data) {
 					/* Subscribe to the new one */
 					janus_mutex_lock(&ps->subscribers_mutex);
 					/* Re-check under the same mutex used for linking: cleanup may have
-					 * started after validation pinned this stream. */
-					janus_videoroom_publisher *ps_pub = ps->publisher;
+					 * started after validation pinned this stream. Use the publisher
+					 * pinned in `publishers` (not ps->publisher) to avoid racing with
+					 * publisher_stream_destroy clearing that pointer. */
+					janus_videoroom_publisher *ps_pub =
+						(janus_videoroom_publisher *)g_list_nth_data(publishers, i);
 					if(g_atomic_int_get(&ps->destroyed) || ps_pub == NULL ||
 							g_atomic_int_get(&ps_pub->destroyed) ||
 							ps_pub->session == NULL ||
