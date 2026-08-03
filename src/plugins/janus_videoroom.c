@@ -12654,6 +12654,7 @@ static void *janus_videoroom_handler(void *data) {
 				json_t *feeds = json_object_get(root, "streams");
 				json_t *feed = json_object_get(root, "feed");
 				GList *publishers = NULL;
+				GList *targets = NULL;
 				if(feeds == NULL || json_array_size(feeds) == 0) {
 					/* For backwards compatibility, we still support the old "feed" property, which means
 					 * "switch to all the feeds from this publisher" (much less sophisticated, though) */
@@ -12739,7 +12740,13 @@ static void *janus_videoroom_handler(void *data) {
 						error_code, error_cause, TRUE,
 						JANUS_VIDEOROOM_ERROR_MISSING_ELEMENT, JANUS_VIDEOROOM_ERROR_INVALID_ELEMENT);
 					if(error_code != 0) {
-						/* Unref publishers we may have taken note of so far */
+						/* Unref publishers/streams we may have taken note of so far */
+						while(targets) {
+							janus_videoroom_publisher_stream *tps = (janus_videoroom_publisher_stream *)targets->data;
+							if(tps)
+								janus_refcount_decrease(&tps->ref);
+							targets = g_list_delete_link(targets, targets);
+						}
 						while(publishers) {
 							janus_videoroom_publisher *publisher = (janus_videoroom_publisher *)publishers->data;
 							janus_refcount_decrease(&publisher->session->ref);
@@ -12759,7 +12766,13 @@ static void *janus_videoroom_handler(void *data) {
 							JANUS_VIDEOROOM_ERROR_MISSING_ELEMENT, JANUS_VIDEOROOM_ERROR_INVALID_ELEMENT);
 					}
 					if(error_code != 0) {
-						/* Unref publishers we may have taken note of so far */
+						/* Unref publishers/streams we may have taken note of so far */
+						while(targets) {
+							janus_videoroom_publisher_stream *tps = (janus_videoroom_publisher_stream *)targets->data;
+							if(tps)
+								janus_refcount_decrease(&tps->ref);
+							targets = g_list_delete_link(targets, targets);
+						}
 						while(publishers) {
 							janus_videoroom_publisher *publisher = (janus_videoroom_publisher *)publishers->data;
 							janus_refcount_decrease(&publisher->session->ref);
@@ -12783,13 +12796,28 @@ static void *janus_videoroom_handler(void *data) {
 					janus_mutex_lock(&subscriber->room->mutex);
 					janus_videoroom_publisher *publisher = g_hash_table_lookup(subscriber->room->participants,
 						string_ids ? (gpointer)feed_id_str : (gpointer)&feed_id);
+					if(publisher) {
+						/* Pin before unlock: room mutex does not keep the publisher alive. */
+						janus_refcount_increase(&publisher->ref);
+						janus_refcount_increase(&publisher->session->ref);
+					}
 					janus_mutex_unlock(&subscriber->room->mutex);
 					if(publisher == NULL || g_atomic_int_get(&publisher->destroyed) ||
 							!g_atomic_int_get(&publisher->session->started)) {
 						JANUS_LOG(LOG_ERR, "No such feed (%s)\n", feed_id_str);
 						error_code = JANUS_VIDEOROOM_ERROR_NO_SUCH_FEED;
 						g_snprintf(error_cause, 512, "No such feed (%s)", feed_id_str);
-						/* Unref publishers we may have taken note of so far */
+						if(publisher) {
+							janus_refcount_decrease(&publisher->session->ref);
+							janus_refcount_decrease(&publisher->ref);
+						}
+						/* Unref publishers/streams we may have taken note of so far */
+						while(targets) {
+							janus_videoroom_publisher_stream *tps = (janus_videoroom_publisher_stream *)targets->data;
+							if(tps)
+								janus_refcount_decrease(&tps->ref);
+							targets = g_list_delete_link(targets, targets);
+						}
 						while(publishers) {
 							publisher = (janus_videoroom_publisher *)publishers->data;
 							janus_refcount_decrease(&publisher->session->ref);
@@ -12804,7 +12832,15 @@ static void *janus_videoroom_handler(void *data) {
 						JANUS_LOG(LOG_ERR, "Can't mix normal and end-to-end encrypted subscriptions\n");
 						error_code = JANUS_VIDEOROOM_ERROR_INVALID_FEED;
 						g_snprintf(error_cause, 512, "Can't mix normal and end-to-end encrypted subscriptions");
-						/* Unref publishers we may have taken note of so far */
+						janus_refcount_decrease(&publisher->session->ref);
+						janus_refcount_decrease(&publisher->ref);
+						/* Unref publishers/streams we may have taken note of so far */
+						while(targets) {
+							janus_videoroom_publisher_stream *tps = (janus_videoroom_publisher_stream *)targets->data;
+							if(tps)
+								janus_refcount_decrease(&tps->ref);
+							targets = g_list_delete_link(targets, targets);
+						}
 						while(publishers) {
 							publisher = (janus_videoroom_publisher *)publishers->data;
 							janus_refcount_decrease(&publisher->session->ref);
@@ -12815,14 +12851,23 @@ static void *janus_videoroom_handler(void *data) {
 						goto error;
 					}
 					const char *mid = json_string_value(json_object_get(s, "mid"));
-					/* Check the mid too */
+					/* Check the mid too and pin the target stream before apply */
 					janus_mutex_lock(&publisher->streams_mutex);
-					if(g_hash_table_lookup(publisher->streams_bymid, mid) == NULL) {
+					janus_videoroom_publisher_stream *ps = g_hash_table_lookup(publisher->streams_bymid, mid);
+					if(ps == NULL || g_atomic_int_get(&ps->destroyed)) {
 						janus_mutex_unlock(&publisher->streams_mutex);
 						JANUS_LOG(LOG_ERR, "No such mid '%s' in feed (%s)\n", mid, feed_id_str);
 						error_code = JANUS_VIDEOROOM_ERROR_NO_SUCH_FEED;
 						g_snprintf(error_cause, 512, "No such mid '%s' in feed (%s)", mid, feed_id_str);
-						/* Unref publishers we may have taken note of so far */
+						janus_refcount_decrease(&publisher->session->ref);
+						janus_refcount_decrease(&publisher->ref);
+						/* Unref publishers/streams we may have taken note of so far */
+						while(targets) {
+							janus_videoroom_publisher_stream *tps = (janus_videoroom_publisher_stream *)targets->data;
+							if(tps)
+								janus_refcount_decrease(&tps->ref);
+							targets = g_list_delete_link(targets, targets);
+						}
 						while(publishers) {
 							publisher = (janus_videoroom_publisher *)publishers->data;
 							janus_refcount_decrease(&publisher->session->ref);
@@ -12832,11 +12877,10 @@ static void *janus_videoroom_handler(void *data) {
 						janus_refcount_decrease(&subscriber->ref);
 						goto error;
 					}
+					janus_refcount_increase(&ps->ref);
 					janus_mutex_unlock(&publisher->streams_mutex);
-					/* Increase the refcount before unlocking so that nobody can remove and free the publisher in the meantime. */
-					janus_refcount_increase(&publisher->ref);
-					janus_refcount_increase(&publisher->session->ref);
 					publishers = g_list_append(publishers, publisher);
+					targets = g_list_append(targets, ps);
 				}
 				gboolean paused = subscriber->paused;
 				subscriber->paused = TRUE;
@@ -12855,7 +12899,9 @@ static void *janus_videoroom_handler(void *data) {
 						JANUS_LOG(LOG_WARN, "Subscriber stream with mid '%s' not found, not switching...\n", sub_mid);
 						continue;
 					}
-					/* Look for the publisher stream to switch to */
+					/* Target mid already validated and pinned in `targets`.
+					 * Do NOT take publisher->streams_mutex here: we already hold
+					 * subscriber->streams_mutex (ABBA vs publisher cleanup). */
 					json_t *feed = json_object_get(s, "feed");
 					guint64 feed_id = 0;
 					char feed_id_num[30], *feed_id_str = NULL;
@@ -12867,16 +12913,8 @@ static void *janus_videoroom_handler(void *data) {
 						feed_id_str = (char *)json_string_value(feed);
 					}
 					const char *mid = json_string_value(json_object_get(s, "mid"));
-					janus_videoroom_publisher *publisher = g_hash_table_lookup(subscriber->room->participants,
-						string_ids ? (gpointer)feed_id_str : (gpointer)&feed_id);
-					if(publisher == NULL || g_atomic_int_get(&publisher->destroyed) ||
-							!g_atomic_int_get(&publisher->session->started)) {
-						JANUS_LOG(LOG_WARN, "Publisher '%s' not found, not switching...\n", feed_id_str);
-						continue;
-					}
-					janus_mutex_lock(&publisher->streams_mutex);
-					janus_videoroom_publisher_stream *ps = g_hash_table_lookup(publisher->streams_bymid, mid);
-					janus_mutex_unlock(&publisher->streams_mutex);
+					janus_videoroom_publisher_stream *ps =
+						(janus_videoroom_publisher_stream *)g_list_nth_data(targets, i);
 					if(ps == NULL || g_atomic_int_get(&ps->destroyed)) {
 						JANUS_LOG(LOG_WARN, "Publisher '%s' doesn't have any mid '%s', not switching...\n", feed_id_str, mid);
 						continue;
@@ -13030,6 +13068,12 @@ static void *janus_videoroom_handler(void *data) {
 				janus_mutex_unlock(&subscriber->streams_mutex);
 				janus_mutex_unlock(&subscriber->room->mutex);
 				/* Decrease the references we took before */
+				while(targets) {
+					janus_videoroom_publisher_stream *tps = (janus_videoroom_publisher_stream *)targets->data;
+					if(tps)
+						janus_refcount_decrease(&tps->ref);
+					targets = g_list_delete_link(targets, targets);
+				}
 				while(publishers) {
 					janus_videoroom_publisher *publisher = (janus_videoroom_publisher *)publishers->data;
 					janus_refcount_decrease(&publisher->session->ref);
