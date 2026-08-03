@@ -444,7 +444,9 @@ room-<unique room ID>: {
 \verbatim
 {
 	"request" : "listparticipants",
-	"room" : <unique numeric ID of the room>
+	"room" : <unique numeric ID of the room>,
+	"list_streams" : <true|false, optional; include per-stream details>,
+	"count_only" : <true|false, optional; if true, return counters only (no participants array)>
 }
 \endverbatim
  *
@@ -465,6 +467,25 @@ room-<unique room ID>: {
 		},
 		// Other participants
 	]
+}
+\endverbatim
+ *
+ * When \c count_only is true, the \c participants array is omitted and
+ * aggregate counters are returned instead (express extension):
+ *
+\verbatim
+{
+	"videoroom" : "participants",
+	"room" : <unique numeric ID of the room>,
+	"count_only" : true,
+	"participants_n" : <all handles in the room>,
+	"real_n" : <display ends with :feed or :screen>,
+	"real_active_n" : <real_n and currently publishing>,
+	"feeds_n" : <display ends with :feed>,
+	"screens_n" : <display ends with :screen or screen media flag>,
+	"publishers_n" : <publishing and not screen>,
+	"audio_n" : <among publishers_n with recent audio>,
+	"video_n" : <among publishers_n with recent video>
 }
 \endverbatim
  *
@@ -2261,7 +2282,8 @@ static struct janus_json_parameter remote_publisher_stream_parameters[] = {
 	{"playoutdelay_ext_id", JANUS_JSON_INTEGER, 0},
 };
 static struct janus_json_parameter list_participants_parameters[] = {
-	{"list_streams", JANUS_JSON_BOOL, 0}
+	{"list_streams", JANUS_JSON_BOOL, 0},
+	{"count_only", JANUS_JSON_BOOL, 0}
 };
 
 /* Static configuration instance */
@@ -7161,6 +7183,10 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			room_id_str = (char *)json_string_value(room);
 		}
 		gboolean list_streams = json_is_true(json_object_get(root, "list_streams"));
+		gboolean count_only = json_is_true(json_object_get(root, "count_only"));
+		/* count_only wins over list_streams: no participant/stream JSON */
+		if(count_only)
+			list_streams = FALSE;
 		janus_mutex_lock(&rooms_mutex);
 		janus_videoroom *videoroom = NULL;
 		error_code = janus_videoroom_access_room(root, FALSE, FALSE, &videoroom, error_cause, sizeof(error_cause));
@@ -7171,7 +7197,9 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		janus_refcount_increase(&videoroom->ref);
 		janus_mutex_unlock(&rooms_mutex);
 		/* Return a list of all participants (whether they're publishing or not) */
-		json_t *list = json_array();
+		json_t *list = count_only ? NULL : json_array();
+		guint participants_n = 0, real_n = 0, real_active_n = 0;
+		guint feeds_n = 0, screens_n = 0, publishers_n = 0, audio_n = 0, video_n = 0;
 		GHashTableIter iter;
 		gpointer value;
 		janus_mutex_lock(&videoroom->mutex);
@@ -7179,10 +7207,35 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		gint64 now = janus_get_monotonic_time();
 		while (!g_atomic_int_get(&videoroom->destroyed) && g_hash_table_iter_next(&iter, NULL, &value)) {
 			janus_videoroom_publisher *p = value;
+			participants_n++;
+			gboolean is_feed = (p->display && g_str_has_suffix(p->display, ":feed"));
+			gboolean is_screen_display = (p->display && g_str_has_suffix(p->display, ":screen"));
+			gboolean is_screen = is_screen_display || p->screen_receiving;
+			gboolean is_real = is_feed || is_screen_display;
+			gboolean is_publisher = g_atomic_int_get(&p->session->started) ? TRUE : FALSE;
+			gboolean has_audio = (now - p->audio_latest_received <= 2*G_USEC_PER_SEC);
+			gboolean has_video = (now - p->video_latest_received <= 2*G_USEC_PER_SEC);
+			if(is_real)
+				real_n++;
+			if(is_real && is_publisher)
+				real_active_n++;
+			if(is_feed)
+				feeds_n++;
+			if(is_screen)
+				screens_n++;
+			if(is_publisher && !is_screen) {
+				publishers_n++;
+				if(has_audio)
+					audio_n++;
+				if(has_video)
+					video_n++;
+			}
+			if(count_only)
+				continue;
 			json_t *pl = json_object();
 			json_object_set_new(pl, "id", string_ids ? json_string(p->user_id_str) : json_integer(p->user_id));
-			json_object_set_new(pl, "audio", now - p->audio_latest_received <= 2*G_USEC_PER_SEC ? json_true() : json_false());
-			json_object_set_new(pl, "video", now - p->video_latest_received <= 2*G_USEC_PER_SEC ? json_true() : json_false());
+			json_object_set_new(pl, "audio", has_audio ? json_true() : json_false());
+			json_object_set_new(pl, "video", has_video ? json_true() : json_false());
 			json_object_set_new(pl, "screen", p->screen_receiving ? json_true() : json_false());
 			json_object_set_new(pl, "legacy", p->legacy ? json_true() : json_false());
 			if(p->display)
@@ -7199,10 +7252,10 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 				json_object_set_new(pl, "dummy", json_true());
 			if(p->remote)
 				json_object_set_new(pl, "remote", json_true());
-			json_object_set_new(pl, "publisher", g_atomic_int_get(&p->session->started) ? json_true() : json_false());
+			json_object_set_new(pl, "publisher", is_publisher ? json_true() : json_false());
 			/* To see if the participant is talking, we need to find the audio stream(s) */
 			json_t *media = json_array();
-			if(g_atomic_int_get(&p->session->started)) {
+			if(is_publisher) {
 				gboolean talking_found = FALSE, talking = FALSE, video_added = FALSE, audio_added = FALSE;
 				janus_mutex_lock(&p->streams_mutex);
 				GList *temp = p->streams;
@@ -7272,6 +7325,8 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			}
 			if(list_streams)
 				json_object_set_new(pl, "streams", media);
+			else
+				json_decref(media);
 			json_array_append_new(list, pl);
 		}
 		janus_mutex_unlock(&videoroom->mutex);
@@ -7279,7 +7334,19 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		response = json_object();
 		json_object_set_new(response, "videoroom", json_string("participants"));
 		json_object_set_new(response, "room", string_ids ? json_string(room_id_str) : json_integer(room_id));
-		json_object_set_new(response, "participants", list);
+		if(count_only) {
+			json_object_set_new(response, "count_only", json_true());
+			json_object_set_new(response, "participants_n", json_integer(participants_n));
+			json_object_set_new(response, "real_n", json_integer(real_n));
+			json_object_set_new(response, "real_active_n", json_integer(real_active_n));
+			json_object_set_new(response, "feeds_n", json_integer(feeds_n));
+			json_object_set_new(response, "screens_n", json_integer(screens_n));
+			json_object_set_new(response, "publishers_n", json_integer(publishers_n));
+			json_object_set_new(response, "audio_n", json_integer(audio_n));
+			json_object_set_new(response, "video_n", json_integer(video_n));
+		} else {
+			json_object_set_new(response, "participants", list);
+		}
 		goto prepare_response;
 	} else if(!strcasecmp(request_text, "listforwarders")) {
 		/* List all forwarders in a room */
