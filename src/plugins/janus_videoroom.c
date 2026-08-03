@@ -2689,10 +2689,21 @@ static void janus_videoroom_recorder_create(janus_videoroom_publisher_stream *ps
 static void janus_videoroom_recorder_close(janus_videoroom_publisher *participant);
 
 /* Freeing stuff */
+/* Membership of a subscriber_stream in ps->subscribers holds one ref on the
+ * subscriber. That keeps hangup_media from observing a freed ss->subscriber.
+ * Always decrease that ref after unlocking ps->subscribers_mutex. */
+static void janus_videoroom_ref_subscriber_for_ps_link(janus_videoroom_subscriber *subscriber) {
+	if(subscriber)
+		janus_refcount_increase(&subscriber->ref);
+}
+static void janus_videoroom_unref_subscriber_for_ps_link(janus_videoroom_subscriber *subscriber) {
+	if(subscriber)
+		janus_refcount_decrease(&subscriber->ref);
+}
+
 static void janus_videoroom_subscriber_stream_destroy(janus_videoroom_subscriber_stream *s) {
 	if(s && g_atomic_int_compare_and_exchange(&s->destroyed, 0, 1))
 		janus_refcount_decrease(&s->ref);
-	/* TODO Should unref the subscriber instance? */
 }
 
 static void janus_videoroom_subscriber_stream_unref(janus_videoroom_subscriber_stream *s) {
@@ -2712,6 +2723,7 @@ static void janus_videoroom_subscriber_stream_free(const janus_refcount *s_ref) 
 	g_free(s->h264_profile);
 	g_free(s->vp9_profile);
 	janus_rtp_svc_context_reset(&s->svc_context);
+	s->subscriber = NULL;
 	g_free(s);
 }
 
@@ -2757,7 +2769,15 @@ static void janus_videoroom_publisher_stream_free(const janus_refcount *ps_ref) 
 	g_free(ps->h264_profile);
 	g_free(ps->vp9_profile);
 	janus_recorder_destroy(ps->rc);
-	g_slist_free(ps->subscribers);
+	/* Exclusive free: drop any leftover membership refs (list should be empty). */
+	GSList *orphaned = ps->subscribers;
+	ps->subscribers = NULL;
+	while(orphaned) {
+		janus_videoroom_subscriber_stream *ss = (janus_videoroom_subscriber_stream *)orphaned->data;
+		orphaned = g_slist_delete_link(orphaned, orphaned);
+		if(ss)
+			janus_videoroom_unref_subscriber_for_ps_link(ss->subscriber);
+	}
 	janus_mutex_destroy(&ps->subscribers_mutex);
 	g_hash_table_destroy(ps->rtp_forwarders);
 	ps->rtp_forwarders = NULL;
@@ -3364,6 +3384,7 @@ static janus_videoroom_subscriber_stream *janus_videoroom_subscriber_stream_add(
 	stream->svc_context.temporal_target = 2;	/* FIXME Actually depends on the scalabilityMode */
 	janus_mutex_lock(&ps->subscribers_mutex);
 	ps->subscribers = g_slist_append(ps->subscribers, stream);
+	janus_videoroom_ref_subscriber_for_ps_link(subscriber);
 	/* If we're using helper threads, add the subscriber to one of those */
 	if(subscriber->room && subscriber->room->helper_threads > 0) {
 		int subscribers = -1;
@@ -3413,6 +3434,7 @@ static janus_videoroom_subscriber_stream *janus_videoroom_subscriber_stream_add_
 				/* The two streams reference each other */
 				janus_refcount_increase(&stream->ref);
 				janus_refcount_increase(&ps->ref);
+				janus_videoroom_ref_subscriber_for_ps_link(subscriber);
 				/* If we're using helper threads, add the subscriber to one of those */
 				if(subscriber->room && subscriber->room->helper_threads > 0) {
 					int subscribers = -1;
@@ -3474,6 +3496,7 @@ static janus_videoroom_subscriber_stream *janus_videoroom_subscriber_stream_add_
 					/* The two streams reference each other */
 					janus_refcount_increase(&stream->ref);
 					janus_refcount_increase(&ps->ref);
+					janus_videoroom_ref_subscriber_for_ps_link(subscriber);
 					/* If we're using helper threads, add the subscriber to one of those */
 					if(subscriber->room && subscriber->room->helper_threads > 0) {
 						int subscribers = -1;
@@ -3520,7 +3543,7 @@ static void janus_videoroom_subscriber_stream_remove(janus_videoroom_subscriber_
 			/* Remove the subscription from the list of recipients */
 			if(lock_ps)
 				janus_mutex_lock(&ps->subscribers_mutex);
-			gboolean unref_ps = FALSE, unref_ss = FALSE;
+			gboolean unref_ps = FALSE, unref_ss = FALSE, unref_subscriber = FALSE;
 			if(g_slist_find(s->publisher_streams, ps) != NULL) {
 				s->publisher_streams = g_slist_remove(s->publisher_streams, ps);
 				unref_ps = TRUE;
@@ -3531,6 +3554,7 @@ static void janus_videoroom_subscriber_stream_remove(janus_videoroom_subscriber_
 			if(g_slist_find(ps->subscribers, s) != NULL) {
 				ps->subscribers = g_slist_remove(ps->subscribers, s);
 				unref_ss = TRUE;
+				unref_subscriber = TRUE;
 			}
 			/* Remove the subscriber from the helper threads too, if any */
 			if(s->subscriber && s->subscriber->room && s->subscriber->room->helper_threads > 0) {
@@ -3559,6 +3583,9 @@ static void janus_videoroom_subscriber_stream_remove(janus_videoroom_subscriber_
 				janus_refcount_decrease(&ps->ref);
 			if(unref_ss)
 				janus_refcount_decrease(&s->ref);
+			/* Drop membership ref after unlock — free must not run under subscribers_mutex */
+			if(unref_subscriber)
+				janus_videoroom_unref_subscriber_for_ps_link(s->subscriber);
 		}
 	} else {
 		/* Unsubscribe from all sources (which will be one for audio/video, potentially more for datachannels) */
@@ -9706,7 +9733,7 @@ static void janus_videoroom_hangup_media_internal(gpointer session_data) {
 		participant->recording_base = NULL;
 		janus_mutex_lock(&participant->streams_mutex);
 		janus_videoroom_recorder_close(participant);
-		janus_mutex_unlock(&participant->streams_mutex)
+		janus_mutex_unlock(&participant->streams_mutex);
 		janus_mutex_unlock(&participant->rec_mutex);
 		participant->acodec = JANUS_AUDIOCODEC_NONE;
 		participant->vcodec = JANUS_VIDEOCODEC_NONE;
@@ -9724,7 +9751,7 @@ static void janus_videoroom_hangup_media_internal(gpointer session_data) {
 			while(temp2) {
 				janus_videoroom_subscriber_stream *ss = (janus_videoroom_subscriber_stream *)temp2->data;
 				temp2 = temp2->next;
-				if(ss) {
+				if(ss && ss->subscriber) {
 					/* Take note of the subscriber, so that we can send an updated offer */
 					if(ss->type != JANUS_VIDEOROOM_MEDIA_DATA && g_list_find(subscribers, ss->subscriber) == NULL) {
 						janus_refcount_increase(&ss->subscriber->ref);
@@ -9763,8 +9790,11 @@ static void janus_videoroom_hangup_media_internal(gpointer session_data) {
 					janus_mutex_lock(&subscriber->streams_mutex);
 					janus_videoroom_subscriber_stream_remove(ss, ps, TRUE);
 					janus_mutex_unlock(&subscriber->streams_mutex);
-					if(m->unref_ss)
+					if(m->unref_ss) {
 						janus_refcount_decrease(&ss->ref);
+						/* List was cleared above; remove() skipped membership unref */
+						janus_videoroom_unref_subscriber_for_ps_link(subscriber);
+					}
 					janus_refcount_decrease(&subscriber->ref);
 				}
 				janus_refcount_decrease(&ss->ref);
@@ -10838,6 +10868,7 @@ static void *janus_videoroom_handler(void *data) {
 							if(g_slist_find(ps->subscribers, data_stream) == NULL && g_slist_find(data_stream->publisher_streams, ps) == NULL) {
 								ps->subscribers = g_slist_append(ps->subscribers, data_stream);
 								data_stream->publisher_streams = g_slist_append(data_stream->publisher_streams, ps);
+								janus_videoroom_ref_subscriber_for_ps_link(subscriber);
 								/* If we're using helper threads, add the subscriber to one of those */
 								if(subscriber->room && subscriber->room->helper_threads > 0) {
 									int subscribers = -1;
@@ -10925,6 +10956,7 @@ static void *janus_videoroom_handler(void *data) {
 								if(g_slist_find(ps->subscribers, data_stream) == NULL && g_slist_find(data_stream->publisher_streams, ps) == NULL) {
 									ps->subscribers = g_slist_append(ps->subscribers, data_stream);
 									data_stream->publisher_streams = g_slist_append(data_stream->publisher_streams, ps);
+									janus_videoroom_ref_subscriber_for_ps_link(subscriber);
 									/* If we're using helper threads, add the subscriber to one of those */
 									if(subscriber->room && subscriber->room->helper_threads > 0) {
 										int subscribers = -1;
@@ -12837,12 +12869,14 @@ static void *janus_videoroom_handler(void *data) {
 						}
 						janus_mutex_unlock(&stream_ps->subscribers_mutex);
 						janus_refcount_decrease(&stream_ps->ref);
+						janus_videoroom_unref_subscriber_for_ps_link(subscriber);
 					}
 
 					/* Subscribe to the new one */
 					janus_mutex_lock(&ps->subscribers_mutex);
 					stream->publisher_streams = g_slist_append(stream->publisher_streams, ps);
 					ps->subscribers = g_slist_append(ps->subscribers, stream);
+					janus_videoroom_ref_subscriber_for_ps_link(subscriber);
 					/* If we're using helper threads, add the subscriber to one of those */
 					if(subscriber->room && subscriber->room->helper_threads > 0) {
 						int subscribers = -1;
@@ -14521,9 +14555,9 @@ cleanup:
 	janus_mutex_lock(&publisher->rec_mutex);
 	g_free(publisher->recording_base);
 	publisher->recording_base = NULL;
-	janus_mutex_lock(&publisher->streams_mutex)
+	janus_mutex_lock(&publisher->streams_mutex);
 	janus_videoroom_recorder_close(publisher);
-	janus_mutex_unlock(&publisher->streams_mutex)
+	janus_mutex_unlock(&publisher->streams_mutex);
 	janus_mutex_unlock(&publisher->rec_mutex);
 	publisher->acodec = JANUS_AUDIOCODEC_NONE;
 	publisher->vcodec = JANUS_VIDEOCODEC_NONE;
@@ -14541,7 +14575,7 @@ cleanup:
 		while(temp2) {
 			janus_videoroom_subscriber_stream *ss = (janus_videoroom_subscriber_stream *)temp2->data;
 			temp2 = temp2->next;
-			if(ss) {
+			if(ss && ss->subscriber) {
 				/* Take note of the subscriber, so that we can send an updated offer */
 				if(ss->type != JANUS_VIDEOROOM_MEDIA_DATA && g_list_find(subscribers, ss->subscriber) == NULL) {
 					janus_refcount_increase(&ss->subscriber->ref);
@@ -14586,8 +14620,10 @@ cleanup:
 				janus_mutex_lock(&subscriber->streams_mutex);
 				janus_videoroom_subscriber_stream_remove(ss, ps, TRUE);
 				janus_mutex_unlock(&subscriber->streams_mutex);
-				if(m->unref_ss)
+				if(m->unref_ss) {
 					janus_refcount_decrease(&ss->ref);
+					janus_videoroom_unref_subscriber_for_ps_link(subscriber);
+				}
 				janus_refcount_decrease(&subscriber->ref);
 			}
 			janus_refcount_decrease(&ss->ref);
