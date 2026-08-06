@@ -517,7 +517,10 @@ room-<unique room ID>: {
 	"id" : <unique ID to register for the publisher; optional, will be chosen by the plugin if missing>,
 	"display" : "<display name for the publisher; optional>",
 	"token" : "<invitation token, in case the room has an ACL; optional>",
-	"metadata" : <valid json object with metadata; optional>
+	"metadata" : <valid json object with metadata; optional>,
+	"notify_room_events" : <true|false, whether this handle should receive room feed
+		notifies (publishers/joining/unpublished/leaving/display/metadata); optional, default=true;
+		does NOT affect per-handle core media receiving events>
 }
 \endverbatim
  *
@@ -528,7 +531,11 @@ room-<unique room ID>: {
  * and go away). As such, it can be used even just as a way to get
  * notifications in a room, without the need of ever actually publishing
  * any stream at all (which explains why the "publisher" role may actually
- * be a bit confusing in this context).
+ * be a bit confusing in this context). When \c notify_room_events is
+ * \c false, room feed notifies are skipped for this handle; core
+ * \c janus media (\c receiving) and other per-handle events still arrive.
+ * The flag is accepted only on \c join / \c joinandconfigure (not mid-session
+ * \c configure); it is immutable after join.
  *
  * A successful \c join will result in a \c joined event, which will contain
  * a list of the currently active (as in publishing via WebRTC) publishers,
@@ -2138,7 +2145,10 @@ static struct janus_json_parameter stop_rtp_forward_parameters[] = {
 };
 static struct janus_json_parameter publisher_parameters[] = {
 	{"display", JSON_STRING, 0},
-	{"metadata", JSON_OBJECT, 0}
+	{"metadata", JSON_OBJECT, 0},
+	/* Express: opt out of room feed notifies (published/joining/unpublished/leaving);
+	 * does not affect per-handle core janus media receiving events */
+	{"notify_room_events", JANUS_JSON_BOOL, 0}
 };
 static struct janus_json_parameter configure_stream_parameters[] = {
 	{"mid", JANUS_JSON_STRING, 0},
@@ -2505,6 +2515,10 @@ typedef struct janus_videoroom_publisher {
 	gboolean audio_receiving;
 	gboolean video_receiving;
 	gboolean screen_receiving;
+	/* Whether this handle receives room feed notifies (publishers/joining/unpublished/leaving).
+	 * Default TRUE. Immutable after join (join/joinandconfigure only).
+	 * Does not affect per-handle core janus media (receiving) events. */
+	gboolean notify_room_events;
 	gint64 audio_latest_received;
 	gint64 video_latest_received;
 	char *audio_mid;
@@ -3224,6 +3238,7 @@ static void janus_videoroom_create_dummy_publisher(janus_videoroom *room, gboole
 	publisher->vcodec = JANUS_VIDEOCODEC_NONE;
 	publisher->dummy = TRUE;
 	publisher->e2ee = room->require_e2ee || e2ee;
+	publisher->notify_room_events = TRUE;
     publisher->audio_latest_received = 0;
     publisher->video_latest_received = 0;
 	janus_mutex_init(&publisher->subscribers_mutex);
@@ -4383,16 +4398,49 @@ static janus_videoroom_subscriber *janus_videoroom_session_get_subscriber_nodebu
 	return subscriber;
 }
 
+/* Room feed notifies that may be skipped when notify_room_events is false.
+ * remote_media / talking / moderation and core janus media are NOT included. */
+static gboolean janus_videoroom_is_room_feed_event(json_t *msg) {
+	if(msg == NULL)
+		return FALSE;
+	const char *vr = json_string_value(json_object_get(msg, "videoroom"));
+	if(vr == NULL || strcasecmp(vr, "event"))
+		return FALSE;
+	if(json_object_get(msg, "publishers") != NULL)
+		return TRUE;
+	if(json_object_get(msg, "joining") != NULL)
+		return TRUE;
+	if(json_object_get(msg, "unpublished") != NULL)
+		return TRUE;
+	if(json_object_get(msg, "leaving") != NULL)
+		return TRUE;
+	if(json_object_get(msg, "kicked") != NULL)
+		return TRUE;
+	/* display/metadata change (exclude moderation which also has videoroom=event + id) */
+	if(json_object_get(msg, "id") != NULL &&
+			json_object_get(msg, "moderation") == NULL &&
+			json_object_get(msg, "mid") == NULL &&
+			(json_object_get(msg, "display") != NULL || json_object_get(msg, "metadata") != NULL))
+		return TRUE;
+	return FALSE;
+}
+
 static void janus_videoroom_notify_participants(janus_videoroom_publisher *participant, json_t *msg, gboolean notify_source_participant) {
 	/* participant->room->mutex has to be locked. */
 	if(participant->room == NULL)
 		return;
+	gboolean feed_event = janus_videoroom_is_room_feed_event(msg);
 	GHashTableIter iter;
 	gpointer value;
 	g_hash_table_iter_init(&iter, participant->room->participants);
 	while (participant->room && !g_atomic_int_get(&participant->room->destroyed) && g_hash_table_iter_next(&iter, NULL, &value)) {
 		janus_videoroom_publisher *p = value;
 		if(p && !g_atomic_int_get(&p->destroyed) && p->session && (p != participant || notify_source_participant) && !participant->dummy) {
+			if(feed_event && !p->notify_room_events) {
+				JANUS_LOG(LOG_HUGE, "Skipping room feed notify for participant %s (notify_room_events=false)\n",
+					p->user_id_str);
+				continue;
+			}
 			JANUS_LOG(LOG_VERB, "Notifying participant %s (%s)\n", p->user_id_str, p->display ? p->display : "??");
 			int ret = gateway->push_event(p->session->handle, &janus_videoroom_plugin, NULL, msg, NULL);
 			JANUS_LOG(LOG_VERB, "  >> %d (%s)\n", ret, janus_get_api_error(ret));
@@ -8221,6 +8269,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		publisher->contour = contour ? g_strdup(json_string_value(server_id)) : NULL;
 		publisher->contour_shared = contour_shared ? json_is_true(contour_shared) : TRUE;
 		publisher->legacy = FALSE;
+		publisher->notify_room_events = TRUE;
 		publisher->audio_latest_received = 0;
 		publisher->video_latest_received = 0;
 		pipe(publisher->pipefd);
@@ -10225,7 +10274,8 @@ static void *janus_videoroom_handler(void *data) {
 				json_t *bitrate = NULL, *record = NULL, *recfile = NULL,
 					*audiocodec = NULL, *videocodec = NULL,
 					*user_audio_active_packets = NULL, *user_audio_level_average = NULL,
-					*server_id = NULL, *contour = NULL, *contour_shared = NULL, *legacy = NULL;
+					*server_id = NULL, *contour = NULL, *contour_shared = NULL, *legacy = NULL,
+					*notify_room_events = NULL;
 				if(!strcasecmp(request_text, "joinandconfigure")) {
 					/* Also configure (or publish a new feed) audio/video/bitrate for this new publisher */
 					/* join_parameters were validated earlier. */
@@ -10239,6 +10289,7 @@ static void *janus_videoroom_handler(void *data) {
 				contour = json_object_get(root, "contour");
 				contour_shared = json_object_get(root, "contour_shared");
 				legacy = json_object_get(root, "legacy");
+				notify_room_events = json_object_get(root, "notify_room_events");
 				user_audio_active_packets = json_object_get(root, "audio_active_packets");
 				user_audio_level_average = json_object_get(root, "audio_level_average");
 				janus_videoroom_publisher *publisher = g_malloc0(sizeof(janus_videoroom_publisher));
@@ -10255,6 +10306,7 @@ static void *janus_videoroom_handler(void *data) {
 				publisher->contour = NULL;
 				publisher->contour_shared = TRUE;
 				publisher->legacy = FALSE;
+				publisher->notify_room_events = TRUE;
 				publisher->recording_active = FALSE;
 				publisher->recording_base = NULL;
 				publisher->firefox = FALSE;
@@ -10386,6 +10438,11 @@ static void *janus_videoroom_handler(void *data) {
 					publisher->legacy = json_is_true(legacy);
 					JANUS_LOG(LOG_VERB, "Setting legacy property: %s (room %s, user %s)\n",
 						publisher->legacy ? "true" : "false", publisher->room_id_str, publisher->user_id_str);
+				}
+				if(notify_room_events) {
+					publisher->notify_room_events = json_is_true(notify_room_events);
+					JANUS_LOG(LOG_VERB, "Setting notify_room_events: %s (room %s, user %s)\n",
+						publisher->notify_room_events ? "true" : "false", publisher->room_id_str, publisher->user_id_str);
 				}
 				/* Done */
 				janus_mutex_lock(&session->mutex);
