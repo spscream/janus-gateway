@@ -9412,8 +9412,15 @@ static void *janus_audiobridge_participant_thread(void *data) {
 				}
 			}
 		}
-		/* Now check if there's packets to encode */
-		mixedpkt = g_async_queue_try_pop(participant->outbuf);
+		/* Now check if there's packets to encode: вместо опроса каждые 2.5 мс ждём
+		 * либо готовый микс, либо ближайший такт — это срезает число пробуждений
+		 * потока примерно вчетверо и разгружает очередь планировщика */
+		gint64 wait_us = (before + 20000) - janus_get_monotonic_time();
+		if(wait_us < 500)
+			wait_us = 500;
+		else if(wait_us > 20000)
+			wait_us = 20000;
+		mixedpkt = g_async_queue_timeout_pop(participant->outbuf, wait_us);
 		if(mixedpkt != NULL && g_atomic_int_get(&session->destroyed) == 0 && g_atomic_int_get(&session->started)) {
 			if(g_atomic_int_get(&participant->active) && (participant->codec == JANUS_AUDIOCODEC_PCMA ||
 					participant->codec == JANUS_AUDIOCODEC_PCMU)) {
@@ -9477,7 +9484,6 @@ static void *janus_audiobridge_participant_thread(void *data) {
 			g_free(mixedpkt->data);
 			g_free(mixedpkt);
 		}
-		g_usleep(2500);
 	}
 	/* We're done, get rid of the resources */
 	g_free(outpkt->data);
